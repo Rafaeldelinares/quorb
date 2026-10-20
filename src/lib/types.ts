@@ -117,7 +117,12 @@ export interface CopilotConfig {
   customAllowance: number | null;
 }
 
+/** Idioma de la interfaz (config.rs › LOCALES). El backend sanea cualquier otro valor a `es`. */
+export type Locale = 'es' | 'en';
+
 export interface AppConfig {
+  /** Idioma de la interfaz; `es` por defecto */
+  locale: Locale;
   refreshMinutes: number;
   opacity: number;
   compact: boolean;

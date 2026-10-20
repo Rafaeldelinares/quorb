@@ -1,0 +1,282 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { execFileSync, spawnSync } from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { extractRust, extractTs, isUiText } from './i18n-inventory.mjs';
+
+const SCRIPT = path.join(path.dirname(fileURLToPath(import.meta.url)), 'i18n-inventory.mjs');
+const texts = (entries) => entries.map((e) => [e.line, e.text]);
+
+test('isUiText keeps human text and drops identifiers, urls and css', () => {
+  for (const s of ['Guardar', 'Guardar cambios', 'sesión', 'Cuenta ${…}', ' · saldo comunicado', 'Quitar',
+    'Dónde escucha 9Router (por defecto http://localhost:20128).', 'p. ej. /usage/used_tokens']) {
+    assert.equal(isUiText(s), true, s);
+  }
+  for (const s of ['', '   ', '{}', 'save_config', 'eg-gauge__key', 'top', 'camelCase', 'https://github.com/egdev6/quorb',
+    'GET', 'USD', 'Content-Type', './lib/types', 'src/lib/format.ts', '#ff0036', '%APPDATA%', '12px', '--eg-accent']) {
+    assert.equal(isUiText(s), false, s);
+  }
+});
+
+test('extractTs finds JSX text, visible attributes, strings and templates with exact lines', () => {
+  const src = [
+    "import { invoke } from '@tauri-apps/api/core';", // 1
+    "type Edge = 'Arriba' | 'Abajo';", // 2
+    'export function View({ count }: { count: number }) {', // 3
+    "  const label = count === 1 ? '1 reset disponible' : `${count} resets disponibles`;", // 4
+    "  invoke('save_config');", // 5
+    "  console.log('Depuración interna');", // 6
+    '  // Comentario que no es UI', // 7
+    '  return (', // 8
+    '    <div className="Panel principal" title="Guardar cambios">', // 9
+    '      <b>Hay una versión nueva</b>', // 10
+    '      <a href="https://example.com">Ver notas</a>', // 11
+    '    </div>', // 12
+    '  );', // 13
+    '}', // 14
+    "listen('usage-updated', () => notify('Sesión caducada', 'Pulsa «Renovar sesión» en su panel.'));", // 15
+    "console.error('Fallo interno', () => alert('Aviso visible al usuario'));", // 16
+  ].join('\n');
+  assert.deepEqual(texts(extractTs(src, 'View.tsx')), [
+    [4, '1 reset disponible'],
+    [4, '${…} resets disponibles'],
+    [9, 'Guardar cambios'],
+    [10, 'Hay una versión nueva'],
+    [11, 'Ver notas'],
+    [15, 'Sesión caducada'],
+    [15, 'Pulsa «Renovar sesión» en su panel.'],
+    [16, 'Aviso visible al usuario'],
+  ]);
+});
+
+test('extractRust skips comments, test modules and log macros', () => {
+  const src = [
+    '//! Módulo de prueba con "comillas" en el doc', // 1
+    'use std::fmt; // "No es texto"', // 2
+    '/* "Bloque comentado" */', // 3
+    "fn lifetime<'a>(s: &'a str) -> char { '\"' }", // 4
+    'fn plan(n: usize) -> String {', // 5
+    '    format!("{n} proveedor{}", if n == 1 { "" } else { "es" })', // 6
+    '}', // 7
+    'const MSG: &str = "Sin datos de 9Router";', // 8
+    'const RAW: &str = r#"Texto "crudo" visible"#;', // 9
+    'const ESC: &str = "Dice \\"hola\\" al usuario";', // 10
+    'fn warn() { eprintln!("Fallo interno de depuración"); }', // 11
+    '#[cfg(test)]', // 12
+    'mod tests {', // 13
+    '    const T: &str = "Texto solo de test";', // 14
+    '    fn nested() { if true { let _ = "Otro texto"; } }', // 15
+    '}', // 16
+    'const AFTER: &str = "Después de los tests";', // 17
+  ].join('\n');
+  assert.deepEqual(texts(extractRust(src)), [
+    [6, '{n} proveedor{}'],
+    [8, 'Sin datos de 9Router'],
+    [9, 'Texto "crudo" visible'],
+    [10, 'Dice "hola" al usuario'],
+    [17, 'Después de los tests'],
+  ]);
+});
+
+function git(dir, ...args) {
+  return execFileSync('git', ['-C', dir, ...args], { encoding: 'utf8' }).trim();
+}
+
+function makeRepo() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'quorb-i18n-inventory-'));
+  git(dir, 'init', '-q');
+  git(dir, 'config', 'user.email', 'test@example.com');
+  git(dir, 'config', 'user.name', 'Test');
+  git(dir, 'config', 'core.autocrlf', 'false');
+  fs.mkdirSync(path.join(dir, 'src'), { recursive: true });
+  fs.mkdirSync(path.join(dir, 'src-tauri', 'src'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'src', 'App.tsx'), "export const A = () => <p title=\"Abrir ajustes\">Hola mundo</p>;\n");
+  fs.writeFileSync(path.join(dir, 'src', 'App.test.tsx'), "it('Texto de test', () => {});\n");
+  fs.writeFileSync(path.join(dir, 'src-tauri', 'src', 'lib.rs'), 'const M: &str = "Salir de Quorb";\n');
+  git(dir, 'add', '.');
+  git(dir, 'commit', '-q', '-m', 'base');
+  return dir;
+}
+
+const run = (dir, ...args) => spawnSync(process.execPath, [SCRIPT, ...args], { cwd: dir, encoding: 'utf8' });
+
+test('CLI writes a reproducible inventory and --check detects drift', () => {
+  const dir = makeRepo();
+  try {
+    const out = 'docs/i18n-inventory.md';
+    const gen = run(dir, '--out', out);
+    assert.equal(gen.status, 0, gen.stderr);
+    const doc = fs.readFileSync(path.join(dir, out), 'utf8');
+    const sha = git(dir, 'rev-parse', 'HEAD');
+    // Anchored to content-addressed source trees, not to a commit id.
+    assert.match(doc, new RegExp(`\`src/\` = \`${git(dir, 'rev-parse', 'HEAD:src')}\``));
+    assert.match(doc, new RegExp(`\`src-tauri/src/\` = \`${git(dir, 'rev-parse', 'HEAD:src-tauri/src')}\``));
+    assert.doesNotMatch(doc, new RegExp(sha));
+    assert.match(doc, /src\/App\.tsx/);
+    assert.match(doc, /\| 1 \| Abrir ajustes \|/);
+    assert.match(doc, /\| 1 \| Hola mundo \|/);
+    assert.match(doc, /src-tauri\/src\/lib\.rs/);
+    assert.match(doc, /\| 1 \| Salir de Quorb \|/);
+    assert.doesNotMatch(doc, /Texto de test/);
+    assert.match(doc, /React \(`src\/`\) \| 2 \| 2/);
+    assert.match(doc, /Rust \(`src-tauri\/src\/`\) \| 1 \| 1/);
+
+    // Re-running on the same ref is byte-identical.
+    assert.equal(run(dir, '--out', out, '--ref', sha).status, 0);
+    assert.equal(fs.readFileSync(path.join(dir, out), 'utf8'), doc);
+
+    const ok = run(dir, '--check', '--out', out, '--ref', sha);
+    assert.equal(ok.status, 0, ok.stderr);
+    assert.equal(ok.stderr, '');
+
+    // A Windows checkout with core.autocrlf=true holds the same document with CRLF.
+    fs.writeFileSync(path.join(dir, out), doc.replace(/\n/g, '\r\n'));
+    const crlf = run(dir, '--check', '--out', out, '--ref', sha);
+    assert.equal(crlf.status, 0, crlf.stderr);
+    fs.writeFileSync(path.join(dir, out), doc);
+
+    // Squash/rebase rewrite commit ids but not source trees: --check still passes.
+    git(dir, 'commit', '-q', '--amend', '-m', 'squashed elsewhere');
+    assert.notEqual(git(dir, 'rev-parse', 'HEAD'), sha);
+    const squashed = run(dir, '--check', '--out', out);
+    assert.equal(squashed.status, 0, squashed.stderr);
+
+    fs.writeFileSync(path.join(dir, 'src-tauri', 'src', 'lib.rs'), '\nconst M: &str = "Salir de Quorb";\n');
+    git(dir, 'commit', '-q', '-am', 'shift');
+    const drift = run(dir, '--check', '--out', out);
+    assert.equal(drift.status, 1);
+    assert.match(drift.stderr, /docs\/i18n-inventory\.md is out of date/);
+    assert.equal(fs.readFileSync(path.join(dir, out), 'utf8'), doc, '--check must not rewrite the file');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('CLI rejects unknown arguments without writing', () => {
+  const dir = makeRepo();
+  try {
+    const res = run(dir, '--nope');
+    assert.equal(res.status, 2);
+    assert.match(res.stderr, /unknown argument: --nope/);
+    assert.equal(fs.existsSync(path.join(dir, 'docs')), false);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('R1 extractTs keeps any JSX text with a letter, even a single lowercase or underscore word', () => {
+  const src = [
+    'export const V = () => (', // 1
+    '  <div>', // 2
+    '    <option>nan_member</option>', // 3
+    '    <span>min</span>', // 4
+    '    <i>·</i>', // 5
+    '    <b>{count}</b>', // 6
+    '  </div>', // 7
+    ');', // 8
+  ].join('\n');
+  assert.deepEqual(texts(extractTs(src, 'V.tsx')), [
+    [3, 'nan_member'],
+    [4, 'min'],
+  ]);
+});
+
+test('R2 extractTs always keeps string/template values of placeholder, title, alt, label, hint and text aria-* (not state aria-*)', () => {
+  const src = [
+    'export const V = ({ n, on }) => (', // 1
+    '  <div>', // 2
+    '    <input placeholder="tu@correo.com" title={`min ${n}`} alt={\'logo\'} />', // 3
+    '    <Field label="user_name" hint={on ? \'sí\' : \'no_hay\'} aria-label="close" />', // 4
+    '    <a title="https://example.com/x" placeholder="1234" aria-valuenow={5} />', // 5
+    '    <a name="top_x" id="main_id" aria-current={n} aria-hidden="true" aria-live="polite" />', // 6
+    '  </div>', // 7
+    ');', // 8
+  ].join('\n');
+  assert.deepEqual(texts(extractTs(src, 'V.tsx')), [
+    [3, 'tu@correo.com'],
+    [3, 'min ${…}'],
+    [3, 'logo'],
+    [4, 'user_name'],
+    [4, 'sí'],
+    [4, 'no_hay'],
+    [4, 'close'],
+  ]);
+});
+
+test('R3 extractRust always keeps the string of `unit: Some("…")`', () => {
+  const src = [
+    'fn a() -> Meter {', // 1
+    '    Meter { unit: Some("peticiones"), v: 1 }', // 2
+    '}', // 3
+    'fn b() -> Meter {', // 4
+    '    Meter {', // 5
+    '        unit: Some( "req" ),', // 6
+    '        other: Some("req_x"),', // 7
+    '        unit: Some("USD"),', // 8
+    '        unit: None,', // 9
+    '    }', // 10
+    '}', // 11
+  ].join('\n');
+  assert.deepEqual(texts(extractRust(src)), [
+    [2, 'peticiones'],
+    [6, 'req'],
+    [8, 'USD'],
+  ]);
+});
+
+test('R4 extractRust skips literals that are arguments of .expect, .header, diagnostic and checked', () => {
+  const src = [
+    'fn f(c: &Client) {', // 1
+    '    let v = lock.lock().expect("mutex envenenado en la caché");', // 2
+    '    let r = c.get(url).header("Content-Type", "application/json").send();', // 3
+    '    let d = diagnostic("Falló la consulta de uso", 3);', // 4
+    '    let k = checked("Valor fuera de rango");', // 5
+    '    let m = format!("Texto visible");', // 6
+    '    let e = res.expect_err("Texto con expect_err");', // 7
+    '    let q = is_checked("Texto tras is_checked");', // 8
+    '    let after = lock.expect("dentro");', // 9
+    '    let z = "Después de las llamadas";', // 10
+    '}', // 11
+  ].join('\n');
+  assert.deepEqual(texts(extractRust(src)), [
+    [6, 'Texto visible'],
+    [7, 'Texto con expect_err'],
+    [8, 'Texto tras is_checked'],
+    [10, 'Después de las llamadas'],
+  ]);
+});
+
+test('R5 extractTs skips string operands of === / !== and case clauses', () => {
+  const src = [
+    'export function f(s: string, k: string) {', // 1
+    "  if (s === 'Started' || 'Finished' !== s) return 'Resultado visible';", // 2
+    '  switch (k) {', // 3
+    "    case 'Escape': return 'Cerrar ventana';", // 4
+    "    case 'Enter':", // 5
+    '  }', // 6
+    "  return s == 'Dos iguales';", // 7
+    '}', // 8
+  ].join('\n');
+  assert.deepEqual(texts(extractTs(src, 'f.ts')), [
+    [2, 'Resultado visible'],
+    [4, 'Cerrar ventana'],
+    [7, 'Dos iguales'],
+  ]);
+});
+
+test('R6 extractTs skips string literals inside new Set([...]) but keeps other arrays and object keys', () => {
+  const src = [
+    "const MODS = new Set(['Control', 'Shift', 'Alt gr']);", // 1
+    "const LIST = ['Control', 'Shift'];", // 2
+    "const LABELS: Record<string, number> = { 'Semana · todos': 1, 'Mes': 2 };", // 3
+  ].join('\n');
+  assert.deepEqual(texts(extractTs(src, 'k.ts')), [
+    [2, 'Control'],
+    [2, 'Shift'],
+    [3, 'Semana · todos'],
+    [3, 'Mes'],
+  ]);
+});

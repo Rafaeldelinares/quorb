@@ -7,6 +7,23 @@ pub const ORB_SIZE_MIN: u32 = 32;
 pub const ORB_SIZE_MAX: u32 = 80;
 pub const ORB_SIZE_DEFAULT: u32 = 48;
 pub const ACCENT_DEFAULT: &str = "#ff0036";
+/// Idiomas de la interfaz. Cualquier otro valor se sanea a `LOCALE_DEFAULT`.
+/// Contrato duplicado en `src/lib/types.ts` › `Locale`: si cambias uno, cambia el otro
+/// (la paridad se cubrirá con test junto a los catálogos de L2, #66).
+pub const LOCALES: [&str; 2] = ["es", "en"];
+pub const LOCALE_DEFAULT: &str = "es";
+
+/// Un `locale` con tipo inesperado (null, número, lista…) no puede tirar el
+/// parseo de todo config.json: se lee como vacío y `sanitized` lo lleva a `es`.
+fn lenient_locale<'de, D>(de: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(match serde_json::Value::deserialize(de)? {
+        serde_json::Value::String(s) => s,
+        _ => String::new(),
+    })
+}
 
 /// Acepta `#rgb` o `#rrggbb` (con o sin `#`) y lo devuelve como `#rrggbb` en minúsculas.
 fn normalize_hex(s: &str) -> Option<String> {
@@ -24,6 +41,9 @@ fn normalize_hex(s: &str) -> Option<String> {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(default, rename_all = "camelCase")]
 pub struct AppConfig {
+    /// Idioma de la interfaz: es | en (por defecto `es`).
+    #[serde(deserialize_with = "lenient_locale")]
+    pub locale: String,
     /// Cada cuántos minutos se refrescan los datos (mínimo 1).
     pub refresh_minutes: u32,
     /// Opacidad del widget (0.3 – 1.0).
@@ -233,6 +253,7 @@ impl Account {
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
+            locale: LOCALE_DEFAULT.into(),
             refresh_minutes: 5,
             opacity: 0.94,
             compact: false,
@@ -475,6 +496,8 @@ impl Default for NineRouterConfig {
 impl AppConfig {
     /// Corrige valores fuera de rango.
     pub fn sanitized(mut self) -> Self {
+        let locale = self.locale.trim().to_ascii_lowercase();
+        self.locale = if LOCALES.contains(&locale.as_str()) { locale } else { LOCALE_DEFAULT.into() };
         self.refresh_minutes = self.refresh_minutes.clamp(1, 120);
         self.orb_size = self.orb_size.clamp(ORB_SIZE_MIN, ORB_SIZE_MAX);
         self.accent_color = normalize_hex(&self.accent_color).unwrap_or_else(|| ACCENT_DEFAULT.into());
@@ -833,6 +856,93 @@ mod tests {
         let blank: AppConfig = serde_json::from_str(r#"{"nineRouter":{"baseUrl":"  "}}"#).unwrap();
         assert_eq!(blank.sanitized().nine_router.base_url, "http://localhost:20128");
         assert!(!AppConfig::default().nine_router.enabled);
+    }
+
+    fn locale_of(cfg: &AppConfig) -> serde_json::Value {
+        serde_json::to_value(cfg).unwrap()["locale"].clone()
+    }
+
+    fn temp_config_path(tag: &str) -> std::path::PathBuf {
+        std::env::temp_dir()
+            .join(format!("quorb-locale-{}-{tag}", std::process::id()))
+            .join("config.json")
+    }
+
+    #[test]
+    fn locale_defaults_to_es_on_clean_start() {
+        assert_eq!(locale_of(&AppConfig::default()), "es");
+        // Sin config.json: arranque limpio.
+        let path = temp_config_path("missing");
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(locale_of(&load(&path)), "es");
+    }
+
+    #[test]
+    fn legacy_config_without_locale_uses_es_and_keeps_its_data() {
+        let cfg: AppConfig = serde_json::from_str(r#"{"refreshMinutes": 7, "dockEdge": "left"}"#).unwrap();
+        let cfg = cfg.sanitized();
+        assert_eq!(locale_of(&cfg), "es");
+        assert_eq!(cfg.refresh_minutes, 7);
+        assert_eq!(cfg.dock_edge, "left");
+    }
+
+    #[test]
+    fn supported_locales_are_kept_and_normalized() {
+        for (raw, expected) in [("es", "es"), ("en", "en"), ("EN", "en"), (" en ", "en"), ("Es", "es")] {
+            let json = serde_json::json!({ "locale": raw });
+            let cfg: AppConfig = serde_json::from_value(json).unwrap();
+            assert_eq!(locale_of(&cfg.sanitized()), expected, "locale {raw:?}");
+        }
+    }
+
+    #[test]
+    fn unsupported_or_empty_locale_falls_back_to_es() {
+        for raw in ["fr", "en-US", "es_ES", "", "   ", "basura"] {
+            let json = serde_json::json!({ "locale": raw });
+            let cfg: AppConfig = serde_json::from_value(json).unwrap();
+            assert_eq!(locale_of(&cfg.sanitized()), "es", "locale {raw:?}");
+        }
+    }
+
+    #[test]
+    fn null_or_non_string_locale_falls_back_to_es_without_losing_config() {
+        // Un `locale` con tipo inesperado no puede tirar el parseo de todo config.json.
+        for raw in [r#"null"#, r#"42"#, r#"true"#, r#"["en"]"#, r#"{"code":"en"}"#] {
+            let text = format!(r#"{{"locale": {raw}, "refreshMinutes": 9, "compact": true}}"#);
+            let path = temp_config_path(&format!("odd-{}", raw.len()));
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, text).unwrap();
+            let cfg = load(&path);
+            assert_eq!(locale_of(&cfg), "es", "locale {raw}");
+            assert_eq!(cfg.refresh_minutes, 9, "locale {raw} perdió la config");
+            assert!(cfg.compact, "locale {raw} perdió la config");
+            let _ = std::fs::remove_dir_all(path.parent().unwrap());
+        }
+    }
+
+    #[test]
+    fn locale_survives_save_and_reload_preserving_other_data() {
+        let path = temp_config_path("roundtrip");
+        let mut cfg: AppConfig = serde_json::from_value(serde_json::json!({
+            "locale": "en",
+            "refreshMinutes": 12,
+            "hiddenProviders": ["codex"],
+            "copilot": { "username": "egdev6" },
+            "accounts": [{ "id": "claude:work", "provider": "claude", "label": "Trabajo", "enabled": true }]
+        }))
+        .unwrap();
+        cfg = cfg.sanitized();
+        save(&path, &cfg).unwrap();
+        let reloaded = load(&path);
+        assert_eq!(locale_of(&reloaded), "en");
+        assert_eq!(reloaded, cfg);
+        // Volver a `es` también persiste sin tocar el resto.
+        let mut expected = serde_json::to_value(&reloaded).unwrap();
+        expected["locale"] = serde_json::json!("es");
+        let back: AppConfig = serde_json::from_value(expected.clone()).unwrap();
+        save(&path, &back.sanitized()).unwrap();
+        assert_eq!(serde_json::to_value(load(&path)).unwrap(), expected);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
     #[test]
