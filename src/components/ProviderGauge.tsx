@@ -31,6 +31,7 @@ export function ProviderGauge({
   threshold,
   dragging = false,
   onHover,
+  onClick,
   pointer,
 }: {
   report: UsageReport;
@@ -45,6 +46,7 @@ export function ProviderGauge({
   /** Umbral de aviso (%) */
   threshold?: number;
   onHover: (el: HTMLElement) => void;
+  onClick?: (el: HTMLElement) => void;
   /** Se está arrastrando para reordenar */
   dragging?: boolean;
   /** Manejadores de puntero para reordenar arrastrando */
@@ -89,7 +91,10 @@ export function ProviderGauge({
         if (/Windows/.test(navigator.userAgent) && !e.currentTarget.matches(':focus-visible')) return;
         onHover(e.currentTarget);
       }}
-      onClick={(e) => onHover(e.currentTarget)}
+      onClick={(e) => {
+        if (onClick) onClick(e.currentTarget);
+        else onHover(e.currentTarget);
+      }}
       onPointerCancel={pointer?.onPointerUp}
       {...pointer}
     >

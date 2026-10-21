@@ -25,7 +25,7 @@ import { peekRect, usesPeekWindow, waitForViewport, watchPreparation } from './l
 import { useDockReveal } from './lib/useDockReveal';
 
 const CLOSE_DELAY = 280;
-const OPEN_DELAY = 90;
+const OPEN_DELAY = 350;
 const HIDE_DELAY = 900;
 /** Tras un aviso, la tira se muestra este tiempo aunque esté en auto-ocultar. */
 const REVEAL_MS = 6000;
@@ -514,6 +514,9 @@ export function Widget() {
   useEffect(() => {
     let disposed = false;
     const win = getCurrentWindow();
+    // Windows DWM recovery (#147/#148): on Wayland/Linux, outerPosition() returns (0,0)
+    // and GTK window sizing differs, causing infinite false-positive recovery loops.
+    if (!/Windows/.test(navigator.userAgent)) return;
     const allowed = () => !disposed && !drag.current && !placementInFlight.current
       && (phase === 'open' || phase === 'hidden') && shown.current && widgetBounds.current !== null;
     const check = createWidgetRecovery({
@@ -663,7 +666,7 @@ export function Widget() {
     window.clearTimeout(openTimer.current);
   };
 
-  const openFor = (id: string, el: HTMLElement) => {
+  const openFor = (id: string, el: HTMLElement, immediate = false) => {
     if (phase !== 'open' || drag.current || orbDrag.current?.moved || Date.now() - lastReorderAt.current < 400) return;
     cancelTimers();
     const strip = stripRef.current?.getBoundingClientRect();
@@ -674,7 +677,7 @@ export function Widget() {
       setAnchorRel(rel);
       setHovered(id);
     };
-    if (hovered) go();
+    if (hovered || immediate) go();
     else openTimer.current = window.setTimeout(go, OPEN_DELAY);
   };
 
@@ -708,6 +711,9 @@ export function Widget() {
   // alimenta el tracker. Falla en silencio (Wayland puede no exponer la
   // posición): el muestreo degrada, nunca adivina.
   useEffect(() => {
+    // Solo aplica en macOS (donde WebKit pierde eventos mouseleave en ventanas transparentes).
+    // En Linux/Wayland, cursorPosition() devuelve (0,0) y causa falsos cierres del popup.
+    if (!/Macintosh|Mac OS X/.test(navigator.userAgent)) return;
     if (!hovered) {
       presenceRef.reset();
       return;
@@ -779,13 +785,18 @@ export function Widget() {
     cancelTimers();
     setHovered(null);
     setDragging(true);
-    const d = { sx: e.screenX, sy: e.screenY, start: null as PhysicalPosition | null, sf: geo.sf, raf: 0, pointerId: e.pointerId, ending: false };
+    const initialStart = widgetBounds.current
+      ? new PhysicalPosition(widgetBounds.current.x, widgetBounds.current.y)
+      : null;
+    const d = { sx: e.screenX, sy: e.screenY, start: initialStart, sf: geo.sf, raf: 0, pointerId: e.pointerId, ending: false };
     drag.current = d;
     const current = () => dragMounted.current && drag.current === d;
     enqueueDrag(async () => {
       if (!current()) return;
       const position = await getCurrentWindow().outerPosition();
-      if (current()) d.start = position;
+      if (current() && (position.x !== 0 || position.y !== 0 || !d.start)) {
+        d.start = position;
+      }
     }).catch((err) => {
       if (!current()) return;
       setError(String(err));
@@ -827,10 +838,14 @@ export function Widget() {
         if (!current()) return;
         const [wpos, mons] = await Promise.all([getCurrentWindow().outerPosition(), availableMonitors()]);
         if (!current()) return;
-        // El imán usa el punto donde sueltas el asa (no el centro de la tira):
-        // así, al llevarla a un lateral, se pega a ese lateral aunque sea horizontal.
-        const cx = wpos.x + (grip ? grip.left + grip.width / 2 : 0) * d.sf;
-        const cy = wpos.y + (grip ? grip.top + grip.height / 2 : 0) * d.sf;
+        const posX = (wpos.x !== 0 || wpos.y !== 0)
+          ? wpos.x
+          : (d.start?.x ?? 0) + (e.screenX - d.sx) * d.sf;
+        const posY = (wpos.x !== 0 || wpos.y !== 0)
+          ? wpos.y
+          : (d.start?.y ?? 0) + (e.screenY - d.sy) * d.sf;
+        const cx = posX + (grip ? grip.left + grip.width / 2 : 0) * d.sf;
+        const cy = posY + (grip ? grip.top + grip.height / 2 : 0) * d.sf;
         const mon =
           mons.find((m) => contains({ x: m.position.x, y: m.position.y, w: m.size.width, h: m.size.height }, cx, cy)) ??
           (await currentMonitor());
@@ -982,6 +997,14 @@ export function Widget() {
               threshold={config?.alerts.threshold}
               dragging={reorder?.id === r.id}
               onHover={(el) => openFor(r.id, el)}
+              onClick={(el) => {
+                if (hovered === r.id) {
+                  cancelTimers();
+                  setHovered(null);
+                } else {
+                  openFor(r.id, el, true);
+                }
+              }}
               pointer={orbHandlers(r.id)}
             />
           ))}
