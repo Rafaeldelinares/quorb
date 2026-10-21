@@ -66,6 +66,7 @@ pub async fn fetch(cfg: &ApiCostConfig, who: Who<'_>, http: &reqwest::Client) ->
     if let Some(b) = cfg.monthly_budget_usd.filter(|b| *b > 0.0) {
         let (reset, window) = month_window(chrono::Utc::now());
         report.meters.push(Meter {
+            id: "budget_monthly".into(),
             label: "Presupuesto mensual".into(),
             percent: Some(total / b * 100.0),
             // el importe ya se muestra en `spend`

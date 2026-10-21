@@ -150,10 +150,21 @@ fn window_label(seconds: Option<i64>, fallback: &str) -> String {
     }
 }
 
-fn parse_window(w: &Value, fallback: &str) -> Option<Meter> {
+/// Id estable de la ventana; espeja las ramas de `window_label`.
+fn window_id(seconds: Option<i64>, fallback_id: &str) -> String {
+    match seconds {
+        Some(s) if s > 0 && s <= 6 * 3600 => "session".into(),
+        Some(s) if (6 * 86400..=8 * 86400).contains(&s) => "weekly".into(),
+        Some(s) if s > 0 && s % 86400 == 0 => "window_days".into(),
+        _ => fallback_id.into(),
+    }
+}
+
+fn parse_window(w: &Value, fallback: &str, fallback_id: &str) -> Option<Meter> {
     let pct = w.get("used_percent").and_then(Value::as_f64)?;
     let secs = w.get("limit_window_seconds").and_then(Value::as_i64);
     Some(Meter {
+        id: window_id(secs, fallback_id),
         label: window_label(secs, fallback),
         window_seconds: secs.filter(|s| *s > 0),
         percent: Some(pct),
@@ -174,10 +185,14 @@ pub(crate) fn parse_usage(v: &Value) -> (Option<String>, Vec<Meter>) {
     });
     let mut meters = vec![];
     if let Some(rl) = v.get("rate_limit") {
-        if let Some(m) = rl.get("primary_window").and_then(|w| parse_window(w, "Ventana corta")) {
+        if let Some(m) = rl.get("primary_window").and_then(|w| parse_window(w, "Ventana corta", "window_short")) {
             meters.push(m);
         }
-        if let Some(m) = rl.get("secondary_window").and_then(|w| parse_window(w, "Ventana larga")) {
+        if let Some(mut m) = rl.get("secondary_window").and_then(|w| parse_window(w, "Ventana larga", "window_long")) {
+            // Dos ventanas con el mismo significado no pueden compartir id.
+            if meters.iter().any(|x| x.id == m.id) {
+                m.id = format!("{}_{}", m.id, m.window_seconds.map_or_else(|| "secondary".to_string(), |s| s.to_string()));
+            }
             meters.push(m);
         }
     }
@@ -189,6 +204,7 @@ pub(crate) fn parse_usage(v: &Value) -> (Option<String>, Vec<Meter>) {
         if !unlimited {
             if let Some(b) = balance {
                 meters.push(Meter {
+                    id: "credits".into(),
                     label: "Créditos disponibles".into(),
                     used: Some(b),
                     unit: Some("créditos".into()),
@@ -434,5 +450,40 @@ mod tests {
         assert_eq!(m[1].label, "Semana");
         assert_eq!(m[1].window_seconds, Some(604800));
         assert_eq!(m[2].used, Some(15.0));
+        assert_eq!(m.iter().map(|x| x.id.as_str()).collect::<Vec<_>>(), ["session", "weekly", "credits"]);
+    }
+
+    fn ids_for(primary: Value, secondary: Value) -> Vec<(String, String)> {
+        let v = json!({"rate_limit": {"primary_window": primary, "secondary_window": secondary}});
+        parse_usage(&v).1.into_iter().map(|m| (m.id, m.label)).collect()
+    }
+
+    #[test]
+    fn window_ids_cover_days_and_fallback_windows() {
+        let ids = ids_for(
+            json!({"used_percent": 1, "limit_window_seconds": 3 * 86400}),
+            json!({"used_percent": 2, "limit_window_seconds": 7 * 3600 + 1}),
+        );
+        assert_eq!(ids[0], ("window_days".to_string(), "3 días".to_string()));
+        assert_eq!(ids[1], ("window_long".to_string(), "Ventana larga".to_string()));
+        let ids = ids_for(json!({"used_percent": 1}), json!({"used_percent": 2}));
+        assert_eq!(ids[0].0, "window_short");
+        assert_eq!(ids[1].0, "window_long");
+    }
+
+    #[test]
+    fn colliding_window_ids_are_made_unique_deterministically() {
+        let ids = ids_for(
+            json!({"used_percent": 1, "limit_window_seconds": 18000}),
+            json!({"used_percent": 2, "limit_window_seconds": 18000}),
+        );
+        assert_eq!(ids.iter().map(|(i, _)| i.as_str()).collect::<Vec<_>>(), ["session", "session_18000"]);
+        // Labels stay exactly as today.
+        assert!(ids.iter().all(|(_, l)| l == "Sesión · 5 h"));
+        let days = ids_for(
+            json!({"used_percent": 1, "limit_window_seconds": 2 * 86400}),
+            json!({"used_percent": 2, "limit_window_seconds": 3 * 86400}),
+        );
+        assert_eq!(days.iter().map(|(i, _)| i.as_str()).collect::<Vec<_>>(), ["window_days", "window_days_259200"]);
     }
 }

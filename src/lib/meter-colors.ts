@@ -11,7 +11,13 @@ export function meterColor(report: UsageReport, meter: Meter, index: number): st
     if (seconds >= 6 * 86400 && seconds <= 8 * 86400) return 'var(--ring-1)';
     return seconds < 86400 ? 'var(--ring-2)' : 'var(--ring-3)';
   }
-  // Older reports can omit duration metadata but retain the provider's period label.
+  // Without duration metadata the stable meter id says which period this is (codex may suffix it).
+  if (meter.id) {
+    if (meter.id === 'session' || meter.id.startsWith('session_')) return 'var(--ring-2)';
+    if (meter.id === 'weekly' || meter.id.startsWith('weekly_')) return 'var(--ring-1)';
+    return 'var(--ring-3)';
+  }
+  // Last resort for older reports without an id: the provider's period label.
   if (/^semana\b/i.test(meter.label)) return 'var(--ring-1)';
   if (/^sesión\b/i.test(meter.label)) return 'var(--ring-2)';
   return 'var(--ring-3)';

@@ -279,18 +279,19 @@ fn pretty_plan(s: &str) -> String {
 pub(crate) fn parse_usage(v: &Value) -> Vec<Meter> {
     const H5: i64 = 5 * 3600;
     const D7: i64 = 7 * 86400;
-    const WINDOWS: [(&str, &str, i64); 5] = [
-        ("five_hour", "Sesión · 5 h", H5),
-        ("seven_day", "Semana · todos", D7),
-        ("seven_day_opus", "Semana · Opus", D7),
-        ("seven_day_sonnet", "Semana · Sonnet", D7),
-        ("seven_day_oauth_apps", "Semana · apps", D7),
+    const WINDOWS: [(&str, &str, &str, i64); 5] = [
+        ("five_hour", "session", "Sesión · 5 h", H5),
+        ("seven_day", "weekly", "Semana · todos", D7),
+        ("seven_day_opus", "weekly_opus", "Semana · Opus", D7),
+        ("seven_day_sonnet", "weekly_sonnet", "Semana · Sonnet", D7),
+        ("seven_day_oauth_apps", "weekly_apps", "Semana · apps", D7),
     ];
     let mut out = vec![];
-    for (key, label, secs) in WINDOWS {
+    for (key, id, label, secs) in WINDOWS {
         let Some(w) = v.get(key).filter(|w| w.is_object()) else { continue };
         let Some(pct) = w.get("utilization").and_then(Value::as_f64) else { continue };
         out.push(Meter {
+            id: id.into(),
             label: label.into(),
             percent: Some(pct),
             resets_at: w.get("resets_at").and_then(Value::as_str).map(str::to_string),
@@ -300,6 +301,7 @@ pub(crate) fn parse_usage(v: &Value) -> Vec<Meter> {
     }
     if let Some(extra) = v.get("extra_usage").filter(|e| e.get("is_enabled").and_then(Value::as_bool) == Some(true)) {
         out.push(Meter {
+            id: "extra_usage".into(),
             label: "Uso extra (mes)".into(),
             percent: extra.get("utilization").and_then(Value::as_f64),
             used: extra.get("used_credits").and_then(Value::as_f64),
@@ -346,6 +348,31 @@ mod tests {
         assert_eq!(m[0].percent, Some(37.0));
         assert_eq!(m[2].resets_at, None);
         assert_eq!(m[0].window_seconds, Some(5 * 3600));
+    }
+
+    #[test]
+    fn meters_carry_stable_ids_independent_of_label() {
+        let v = json!({
+            "five_hour": {"utilization": 1.0, "resets_at": null},
+            "seven_day": {"utilization": 2.0, "resets_at": null},
+            "seven_day_opus": {"utilization": 3.0, "resets_at": null},
+            "seven_day_sonnet": {"utilization": 4.0, "resets_at": null},
+            "seven_day_oauth_apps": {"utilization": 5.0, "resets_at": null},
+            "extra_usage": {"is_enabled": true, "utilization": 6.0}
+        });
+        let ids: Vec<_> = parse_usage(&v).into_iter().map(|m| (m.id, m.label)).collect();
+        assert_eq!(
+            ids,
+            [
+                ("session", "Sesión · 5 h"),
+                ("weekly", "Semana · todos"),
+                ("weekly_opus", "Semana · Opus"),
+                ("weekly_sonnet", "Semana · Sonnet"),
+                ("weekly_apps", "Semana · apps"),
+                ("extra_usage", "Uso extra (mes)"),
+            ]
+            .map(|(i, l)| (i.to_string(), l.to_string()))
+        );
     }
 
     /// El secreto del Keychain (`security … -w`) usa la misma estructura JSON

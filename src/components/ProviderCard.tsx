@@ -81,7 +81,7 @@ export function ProviderCard({ report }: { report: UsageReport }) {
             const r = index != null && index < 3 ? index + 1 : null;
             return (
               <MeterBar
-                key={m.label}
+                key={m.id || m.label}
                 meter={m}
                 ring={r}
                 color={index != null ? popupMeterColor(report, m, index) : undefined}

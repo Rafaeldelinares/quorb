@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { detectAlerts, effectFor, nativeAlertsEnabled, notificationText } from './alerts';
+import { detectAlerts, effectFor, nativeAlertsEnabled, notificationText, windowKey } from './alerts';
 import { meterPace, paceOf, spendPace } from './pace';
 import type { UsageReport } from './types';
 
@@ -10,7 +10,7 @@ const rep = (pct: number, resetsAt = '2026-10-06T15:00:00Z', extra: Partial<Usag
   kind: 'subscription',
   status: 'ok',
   plan: 'Max',
-  meters: [{ label: 'Sesión · 5 h', percent: pct, used: null, limit: null, unit: null, resetsAt, windowSeconds: 18000 }],
+  meters: [{ id: 'session', label: 'Sesión · 5 h', percent: pct, used: null, limit: null, unit: null, resetsAt, windowSeconds: 18000 }],
   spend: null,
   message: null,
   action: null,
@@ -46,6 +46,47 @@ describe('alerts', () => {
   it('ignores stale or failed reports', () => {
     expect(detectAlerts([], [rep(99, undefined, { stale: true })], {}, cfg, NOW).events).toHaveLength(0);
     expect(detectAlerts([], [rep(99, undefined, { status: 'error' })], {}, cfg, NOW).events).toHaveLength(0);
+  });
+
+  it('keys alerts by meter id: a relabelled meter neither re-alerts nor loses its reset', () => {
+    const relabel = (r: UsageReport, label: string): UsageReport => ({ ...r, meters: r.meters.map((m) => ({ ...m, label })) });
+    const first = detectAlerts([], [rep(95)], {}, cfg, NOW);
+    expect(first.events).toHaveLength(1);
+    // Same window and same id, translated label: already alerted, no phantom repeat.
+    const translated = relabel(rep(96), 'Session · 5 h');
+    expect(detectAlerts([rep(95)], [translated], first.memory, cfg, NOW).events).toHaveLength(0);
+    // The reset of the exceeded limit is still found although the label differs between cycles.
+    const reset = detectAlerts([rep(95)], [relabel(rep(3, '2026-10-06T20:00:00Z'), 'Session · 5 h')], {}, cfg, NOW);
+    expect(reset.events.map((e) => e.kind)).toEqual(['reset']);
+    expect(reset.events[0].label).toBe('Session · 5 h');
+  });
+
+  it('does not merge different meter ids that happen to share a label', () => {
+    const two = (a: string, b: string): UsageReport => ({
+      ...rep(95),
+      meters: [
+        { ...rep(95).meters[0], id: a, label: 'Same' },
+        { ...rep(95).meters[0], id: b, label: 'Same' },
+      ],
+    });
+    expect(detectAlerts([], [two('weekly', 'weekly_opus')], {}, cfg, NOW).events).toHaveLength(2);
+  });
+
+  it('falls back to the label for meters without an id', () => {
+    const legacy = (pct: number, resetsAt?: string): UsageReport => ({
+      ...rep(pct, resetsAt),
+      meters: rep(pct, resetsAt).meters.map((m) => ({ ...m, id: '' })),
+    });
+    const first = detectAlerts([], [legacy(95)], {}, cfg, NOW);
+    expect(first.events).toHaveLength(1);
+    expect(detectAlerts([legacy(95)], [legacy(97)], first.memory, cfg, NOW).events).toHaveLength(0);
+    expect(detectAlerts([legacy(95)], [legacy(3, '2026-10-06T20:00:00Z')], {}, cfg, NOW).events.map((e) => e.kind)).toEqual(['reset']);
+  });
+
+  it('does not repeat an exceeded alert already remembered under the pre-id label key', () => {
+    const w = windowKey('2026-10-06T15:00:00Z');
+    const legacyMemory = { ['claude|Sesión · 5 h|' + w]: 'exceeded' } as const;
+    expect(detectAlerts([rep(95)], [rep(96)], legacyMemory, cfg, NOW).events).toHaveLength(0);
   });
 
   it('picks the effect and moment', () => {

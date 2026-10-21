@@ -153,6 +153,7 @@ pub(crate) fn parse_quota(v: &Value) -> Vec<Meter> {
         let name = model.split("_vertex").next().unwrap_or(model).to_string();
         let pct = ((1.0 - remaining) * 100.0).clamp(0.0, 100.0);
         let meter = Meter {
+            id: format!("model:{name}"),
             label: name.clone(),
             percent: Some(pct),
             used: None,
@@ -185,6 +186,8 @@ mod tests {
         let m = parse_quota(&v);
         assert_eq!(m.len(), 2);
         assert_eq!(m[0].label, "gemini-2.5-pro");
+        assert_eq!(m[0].id, "model:gemini-2.5-pro");
+        assert_eq!(m[1].id, "model:gemini-2.5-flash");
         assert_eq!(m[0].percent, Some(75.0));
         assert_eq!(m[0].window_seconds, Some(86_400));
         assert_eq!(m[1].percent, Some(0.0));

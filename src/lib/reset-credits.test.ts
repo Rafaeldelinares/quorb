@@ -38,7 +38,7 @@ describe('server-reported Codex reset credits', () => {
   );
 
   it('never infers a balance from a key/period date, quota window or purchased credits', () => {
-    const quota = { label: 'Créditos comprados', percent: 50, used: 2, limit: 4, unit: 'credits',
+    const quota = { id: '', label: 'Créditos comprados', percent: 50, used: 2, limit: 4, unit: 'credits',
       resetsAt: '2030-02-01T00:00:00Z', windowSeconds: 604800 };
     for (const kind of ['key', 'period'] as const) {
       const r = { ...report, validity: { kind, at: '2030-02-01T00:00:00Z' }, meters: [quota],

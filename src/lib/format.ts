@@ -38,19 +38,32 @@ export function formatPercent(p: number): string {
   return `${Math.round(p)}%`;
 }
 
-/** Etiqueta corta para la leyenda de los anillos. */
-export function shortLabel(label: string): string {
-  const map: Record<string, string> = {
-    'Semana · todos': 'Semana',
-    'Semana · Opus': 'Opus',
-    'Semana · Sonnet': 'Sonnet',
-    'Semana · apps': 'Apps',
-    'Presupuesto mensual': 'Presupuesto',
-    'Peticiones (ventana)': 'Peticiones',
-    'Tokens (ventana)': 'Tokens',
-    'Uso extra (mes)': 'Extra',
-  };
-  return map[label] ?? label.replace(/^Sesión · /, 'Sesión ');
+const SHORT_BY_ID = new Map([
+  ['weekly', 'Semana'],
+  ['weekly_opus', 'Opus'],
+  ['weekly_sonnet', 'Sonnet'],
+  ['weekly_apps', 'Apps'],
+  ['budget_monthly', 'Presupuesto'],
+  ['rate_requests', 'Peticiones'],
+  ['rate_tokens', 'Tokens'],
+  ['extra_usage', 'Extra'],
+]);
+
+// Respaldo para medidores sin id (datos antiguos).
+const SHORT_BY_LABEL = new Map([
+  ['Semana · todos', 'Semana'],
+  ['Semana · Opus', 'Opus'],
+  ['Semana · Sonnet', 'Sonnet'],
+  ['Semana · apps', 'Apps'],
+  ['Presupuesto mensual', 'Presupuesto'],
+  ['Peticiones (ventana)', 'Peticiones'],
+  ['Tokens (ventana)', 'Tokens'],
+  ['Uso extra (mes)', 'Extra'],
+]);
+
+/** Etiqueta corta para la leyenda de los anillos: por id estable, con la etiqueta como respaldo. */
+export function shortLabel(label: string, id = ''): string {
+  return SHORT_BY_ID.get(id) ?? SHORT_BY_LABEL.get(label) ?? label.replace(/^Sesión · /, 'Sesión ');
 }
 
 export type Level = 'low' | 'mid' | 'high' | 'max';

@@ -3,7 +3,7 @@ import { disclosureOpen, popupMeterColor, saveDisclosure } from './popup-prefere
 import type { Meter, UsageReport } from './types';
 
 const meter = (windowSeconds: number | null, percent: number | null = 20): Meter => ({
-  label: 'Limit', percent, used: null, limit: null, unit: null, resetsAt: null, windowSeconds,
+  id: '', label: 'Limit', percent, used: null, limit: null, unit: null, resetsAt: null, windowSeconds,
 });
 const report = (meters: Meter[], kind: UsageReport['kind'] = 'subscription'): UsageReport => ({
   id: 'claude', name: 'Claude', kind, status: 'ok', plan: null, meters,

@@ -25,6 +25,9 @@ pub enum Kind {
 #[derive(Serialize, Clone, Debug, PartialEq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct Meter {
+    /// Identificador estable (snake_case) del medidor: la lógica de la UI y el historial
+    /// se apoyan en él, no en `label`, que es solo texto visible.
+    pub id: String,
     pub label: String,
     /// 0–100
     pub percent: Option<f64>,
@@ -135,6 +138,15 @@ mod tests {
         assert!(serde_json::to_value(&report).unwrap().get("availableResets").is_none());
         report.available_resets = Some(0);
         assert_eq!(serde_json::to_value(&report).unwrap()["availableResets"], 0);
+    }
+
+    #[test]
+    fn meter_serializes_its_stable_id_next_to_the_label() {
+        let m = Meter { id: "weekly".into(), label: "Semana".into(), ..Default::default() };
+        let v = serde_json::to_value(&m).unwrap();
+        assert_eq!(v["id"], "weekly");
+        assert_eq!(v["label"], "Semana");
+        assert_eq!(serde_json::to_value(Meter::default()).unwrap()["id"], "");
     }
 
     #[test]

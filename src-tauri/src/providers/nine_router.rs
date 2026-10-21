@@ -403,6 +403,7 @@ fn build_main(cfg: &NineRouterConfig, report: &UsageReport, stats: &Value, chart
     let mut meters = vec![];
     if let Some(budget) = cfg.monthly_budget_usd.filter(|b| *b > 0.0) {
         meters.push(Meter {
+            id: "spend_period".into(),
             label: "Gasto (periodo)".into(),
             percent: Some(totals.cost / budget * 100.0),
             used: Some(totals.cost),
@@ -413,6 +414,7 @@ fn build_main(cfg: &NineRouterConfig, report: &UsageReport, stats: &Value, chart
         });
     }
     meters.push(Meter {
+        id: "tokens".into(),
         label: "Tokens".into(),
         percent: None,
         used: Some(totals.tokens as f64),
@@ -468,6 +470,7 @@ fn parse_provider(entry: &Value) -> Parsed {
     let cost = num("cost");
 
     let meters = vec![Meter {
+        id: "tokens_period".into(),
         label: "Tokens (periodo)".into(),
         percent: None,
         used: Some(tokens as f64),
@@ -610,6 +613,7 @@ mod tests {
         let p = parse_provider(&entry);
         assert_eq!(p.meters[0].used, Some(1500.0));
         assert_eq!(p.meters[0].unit.as_deref(), Some("tokens"));
+        assert_eq!(p.meters[0].id, "tokens_period");
         assert_eq!(p.spend.as_ref().map(|s| s.amount), Some(1.25));
         assert_eq!(p.message.as_deref(), Some("100 peticiones · 1.25 $"));
     }
@@ -777,6 +781,7 @@ mod tests {
             "byProvider": {"claude": {}, "kiro": {}}});
         let r = build_main(&cfg, &UsageReport::new("nine_router", "9Router", Kind::Api), &stats, None, chrono::Local::now());
         assert_eq!(r.meters[0].label, "Gasto (periodo)");
+        assert_eq!(r.meters.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["spend_period", "tokens"]);
         assert_eq!(r.meters[0].percent, Some(50.0));
         assert_eq!(r.plan.as_deref(), Some("2 proveedores"));
     }

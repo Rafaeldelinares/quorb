@@ -73,11 +73,11 @@ pub(crate) fn parse(key: &Value, credits: Option<&Value>) -> Parsed {
             (None, Some("monthly")) => num(d.get("usage_monthly")).unwrap_or(0.0),
             _ => num(d.get("usage")).unwrap_or(0.0),
         };
-        let (label, window) = match reset {
-            Some("daily") => ("Límite diario de la key", Some(86_400)),
-            Some("weekly") => ("Límite semanal de la key", Some(7 * 86_400)),
-            Some("monthly") => ("Límite mensual de la key", None),
-            _ => ("Límite de la key", None),
+        let (id, label, window) = match reset {
+            Some("daily") => ("key_limit_daily", "Límite diario de la key", Some(86_400)),
+            Some("weekly") => ("key_limit_weekly", "Límite semanal de la key", Some(7 * 86_400)),
+            Some("monthly") => ("key_limit_monthly", "Límite mensual de la key", None),
+            _ => ("key_limit", "Límite de la key", None),
         };
         let (resets_at, window_seconds) = match reset {
             Some("monthly") => {
@@ -89,6 +89,7 @@ pub(crate) fn parse(key: &Value, credits: Option<&Value>) -> Parsed {
             _ => (None, None),
         };
         meters.push(Meter {
+            id: id.into(),
             label: label.into(),
             percent: Some(used / limit * 100.0),
             used: Some(used),
@@ -107,6 +108,7 @@ pub(crate) fn parse(key: &Value, credits: Option<&Value>) -> Parsed {
     ) {
         if total > 0.0 {
             meters.push(Meter {
+                id: "balance_spent".into(),
                 label: "Saldo gastado".into(),
                 percent: Some(spent / total * 100.0),
                 used: Some(spent),
@@ -169,6 +171,7 @@ mod tests {
         assert_eq!(p.meters.len(), 2);
         assert_eq!(p.meters[0].percent, Some(30.0));
         assert_eq!(p.meters[0].label, "Límite mensual de la key");
+        assert_eq!(p.meters.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["key_limit_monthly", "balance_spent"]);
         assert!(p.meters[0].resets_at.is_some());
         assert!((p.meters[1].percent.unwrap() - 26.15).abs() < 0.01);
         assert_eq!(p.spend.as_ref().map(|s| s.amount), Some(30.0));
@@ -186,6 +189,19 @@ mod tests {
             assert!(parse(&json!({"data": {"expires_at": value}}), None).validity.is_none());
         }
         assert!(parse(&json!({"data": {"limit_reset": "monthly"}}), None).validity.is_none());
+    }
+
+    #[test]
+    fn key_limit_ids_follow_the_reset_period() {
+        for (reset, id) in [
+            (json!("daily"), "key_limit_daily"),
+            (json!("weekly"), "key_limit_weekly"),
+            (json!("monthly"), "key_limit_monthly"),
+            (json!(null), "key_limit"),
+        ] {
+            let p = parse(&json!({"data": {"usage": 5.0, "limit": 10, "limit_reset": reset}}), None);
+            assert_eq!(p.meters[0].id, id);
+        }
     }
 
     #[test]

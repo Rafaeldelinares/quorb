@@ -9,8 +9,8 @@ const base: UsageReport = {
   status: 'ok',
   plan: 'Max',
   meters: [
-    { label: 'Sesión · 5 h', percent: 37, used: null, limit: null, unit: null, resetsAt: null, windowSeconds: null },
-    { label: 'Semana · todos', percent: 81, used: null, limit: null, unit: null, resetsAt: null, windowSeconds: null },
+    { id: '', label: 'Sesión · 5 h', percent: 37, used: null, limit: null, unit: null, resetsAt: null, windowSeconds: null },
+    { id: '', label: 'Semana · todos', percent: 81, used: null, limit: null, unit: null, resetsAt: null, windowSeconds: null },
   ],
   spend: null,
   message: null,
@@ -70,6 +70,32 @@ describe('format', () => {
     expect(shortLabel('Sesión · 5 h')).toBe('Sesión 5 h');
     expect(shortLabel('Semana · todos')).toBe('Semana');
     expect(shortLabel('Algo nuevo')).toBe('Algo nuevo');
+  });
+
+  it('shortens ring labels by stable id, whatever the label text', () => {
+    const cases: [string, string][] = [
+      ['weekly', 'Semana'],
+      ['weekly_opus', 'Opus'],
+      ['weekly_sonnet', 'Sonnet'],
+      ['weekly_apps', 'Apps'],
+      ['budget_monthly', 'Presupuesto'],
+      ['rate_requests', 'Peticiones'],
+      ['rate_tokens', 'Tokens'],
+      ['extra_usage', 'Extra'],
+    ];
+    for (const [id, short] of cases) expect(shortLabel('Translated label', id)).toBe(short);
+    expect(shortLabel('Sesión · 5 h', 'session')).toBe('Sesión 5 h');
+    expect(shortLabel('Sesión · 3 h', 'session')).toBe('Sesión 3 h');
+    // The codex weekly meter is labelled just «Semana».
+    expect(shortLabel('Semana', 'weekly')).toBe('Semana');
+  });
+
+  it('falls back to the label when the id is empty or unknown', () => {
+    expect(shortLabel('Semana · Opus', '')).toBe('Opus');
+    expect(shortLabel('Semana · Opus')).toBe('Opus');
+    expect(shortLabel('Semana · Opus', 'something_new')).toBe('Opus');
+    expect(shortLabel('Gemini 2.5 Pro', 'model:gemini-2.5-pro')).toBe('Gemini 2.5 Pro');
+    expect(shortLabel('Algo nuevo', 'custom')).toBe('Algo nuevo');
   });
 
   it('builds tray tooltip', () => {

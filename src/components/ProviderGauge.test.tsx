@@ -4,7 +4,7 @@ import { ProviderGauge } from './ProviderGauge';
 import type { Meter, UsageReport } from '../lib/types';
 
 const meter = (label: string, windowSeconds: number | null, percent: number | null = 20): Meter => ({
-  label, windowSeconds, percent, used: null, limit: null, unit: null, resetsAt: null,
+  id: '', label, windowSeconds, percent, used: null, limit: null, unit: null, resetsAt: null,
 });
 function colors(meters: Meter[], small = false, size = 60, id = 'claude') {
   const report: UsageReport = {

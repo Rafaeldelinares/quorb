@@ -160,6 +160,7 @@ pub(crate) fn parse(v: &Value) -> Parsed {
         });
         if let Some(pct) = total {
             meters.push(Meter {
+                id: "plan_total".into(),
                 label: "Plan · total".into(),
                 percent: Some(pct),
                 used: None,
@@ -169,9 +170,10 @@ pub(crate) fn parse(v: &Value) -> Parsed {
                 window_seconds: window,
             });
         }
-        for (key, label) in [("autoPercentUsed", "Plan · Auto"), ("apiPercentUsed", "Plan · modelos API")] {
+        for (key, id, label) in [("autoPercentUsed", "plan_auto", "Plan · Auto"), ("apiPercentUsed", "plan_api", "Plan · modelos API")] {
             if let Some(pct) = n(key) {
                 meters.push(Meter {
+                    id: id.into(),
                     label: label.into(),
                     percent: Some(pct),
                     used: None,
@@ -232,6 +234,7 @@ mod tests {
         assert_eq!(p.meters[0].window_seconds, Some(30 * 86_400));
         assert_eq!(p.meters[0].resets_at.as_deref(), Some("2026-10-20T10:00:00+00:00"));
         assert_eq!(p.meters[2].label, "Plan · modelos API");
+        assert_eq!(p.meters.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["plan_total", "plan_auto", "plan_api"]);
         assert_eq!(p.spend.map(|s| s.amount), Some(4.2));
     }
 

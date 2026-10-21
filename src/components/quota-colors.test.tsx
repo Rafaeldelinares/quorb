@@ -28,7 +28,7 @@ const hour = 5 * 3600;
 const day = 86400;
 const week = 7 * day;
 const meter = (label: string, windowSeconds: number | null, percent: number | null = 25): Meter => ({
-  label, windowSeconds, percent, used: null, limit: null, unit: null,
+  id: '', label, windowSeconds, percent, used: null, limit: null, unit: null,
   resetsAt: '2099-01-01T00:00:00Z',
 });
 const report = (meters: Meter[], id = 'codex', kind: UsageReport['kind'] = 'subscription'): UsageReport => ({

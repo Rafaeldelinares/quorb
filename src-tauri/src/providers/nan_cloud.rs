@@ -178,6 +178,7 @@ pub(crate) fn parse_quota(v: &Value) -> Vec<Meter> {
                 _ => None,
             };
             Some(Meter {
+                id: format!("model:{model}"),
                 label: model.to_string(),
                 percent: Some(used / cap * 100.0),
                 used: Some(used),
@@ -225,6 +226,8 @@ mod tests {
         let m = parse_quota(&v);
         assert_eq!(m.len(), 2);
         assert_eq!(m[0].label, "deepseek-v4-flash");
+        assert_eq!(m[0].id, "model:deepseek-v4-flash");
+        assert_eq!(m[1].id, "model:mimo-v2.6-flash");
         assert!((m[0].percent.unwrap() - 14.8055).abs() < 0.01);
         assert_eq!(m[0].resets_at.as_deref(), Some("2026-11-01T00:00:00+00:00"));
         assert_eq!(m[0].window_seconds, Some(31 * 86400));

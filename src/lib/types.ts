@@ -4,6 +4,8 @@ export type Status = 'ok' | 'warning' | 'error' | 'needsLogin' | 'unconfigured';
 export type Kind = 'subscription' | 'api';
 
 export interface Meter {
+  /** Identificador estable (snake_case); la lógica se apoya en él, no en `label`. Vacío en datos antiguos. */
+  id: string;
   label: string;
   percent: number | null;
   used: number | null;

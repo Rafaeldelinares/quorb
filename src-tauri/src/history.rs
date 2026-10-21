@@ -16,7 +16,7 @@ pub struct Sample {
     pub t: i64,
     /// id del proveedor
     pub p: String,
-    /// etiqueta del medidor (o «spend» para el gasto)
+    /// id estable del medidor (etiqueta en muestras antiguas o medidores sin id; «spend» para el gasto)
     pub l: String,
     /// % del medidor o importe gastado
     pub v: f64,
@@ -62,7 +62,8 @@ pub(crate) fn append(samples: &mut Vec<Sample>, reports: &[UsageReport], now: i6
         let points = r
             .meters
             .iter()
-            .filter_map(|m| m.percent.map(|p| (m.label.clone(), p)))
+            // El id estable identifica la serie; la etiqueta solo es el respaldo de medidores sin id.
+            .filter_map(|m| m.percent.map(|p| (if m.id.is_empty() { m.label.clone() } else { m.id.clone() }, p)))
             .chain(r.spend.as_ref().map(|s| ("spend".to_string(), s.amount)));
         for (label, v) in points {
             let last = samples.iter().rev().find(|x| x.p == r.id && x.l == label);
@@ -98,7 +99,7 @@ mod tests {
 
     fn report(pct: f64) -> UsageReport {
         let mut r = UsageReport::new("claude", "Claude", Kind::Subscription);
-        r.meters.push(Meter { label: "Sesión · 5 h".into(), percent: Some(pct), ..Default::default() });
+        r.meters.push(Meter { id: "session".into(), label: "Sesión · 5 h".into(), percent: Some(pct), ..Default::default() });
         r
     }
 
@@ -116,6 +117,20 @@ mod tests {
         // 31 días después se poda lo viejo
         append(&mut s, &[report(5.0)], 1_000 + 31 * 86400);
         assert_eq!(s.len(), 1);
+    }
+
+    #[test]
+    fn new_samples_store_the_meter_id_and_fall_back_to_the_label() {
+        let mut r = UsageReport::new("claude", "Claude", Kind::Subscription);
+        r.meters.push(Meter { id: "session".into(), label: "Sesión · 5 h".into(), percent: Some(10.0), ..Default::default() });
+        r.meters.push(Meter { label: "Sin id".into(), percent: Some(20.0), ..Default::default() });
+        let mut s = vec![];
+        assert!(append(&mut s, &[r.clone()], 5));
+        assert_eq!(s.iter().map(|x| x.l.as_str()).collect::<Vec<_>>(), ["session", "Sin id"]);
+        // El throttle también va por id: una etiqueta traducida no duplica el punto.
+        r.meters[0].label = "Session · 5 h".into();
+        assert!(!append(&mut s, &[r], 65));
+        assert_eq!(s.len(), 2);
     }
 
     #[test]

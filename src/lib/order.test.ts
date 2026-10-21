@@ -51,7 +51,7 @@ describe('order', () => {
   it('builds a copyable summary', () => {
     const r: UsageReport = {
       id: 'claude', name: 'Claude', kind: 'subscription', status: 'ok', plan: 'Max',
-      meters: [{ label: 'Sesión · 5 h', percent: 37.4, used: null, limit: null, unit: null, resetsAt: null, windowSeconds: null }],
+      meters: [{ id: '', label: 'Sesión · 5 h', percent: 37.4, used: null, limit: null, unit: null, resetsAt: null, windowSeconds: null }],
       spend: { amount: 4.5, currency: 'USD', periodLabel: 'Este mes', budget: null },
       message: null, action: null, fetchedAt: '',
     };

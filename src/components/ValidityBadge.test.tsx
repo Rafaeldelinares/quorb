@@ -103,7 +103,7 @@ describe('banked reset badges', () => {
   });
 
   it('places the expanded balance after both meters and spend stats', () => {
-    const r = { ...withBalance(2), meters: [{ label: 'Semana', percent: 40, used: 2, limit: 5,
+    const r = { ...withBalance(2), meters: [{ id: '', label: 'Semana', percent: 40, used: 2, limit: 5,
       unit: null, resetsAt: null, windowSeconds: 604800 }],
       spend: { amount: 5, currency: 'USD', periodLabel: 'Este mes', budget: 10 } };
     const html = renderToStaticMarkup(<ProviderCard report={r} />);

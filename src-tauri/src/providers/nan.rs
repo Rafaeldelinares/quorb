@@ -377,6 +377,7 @@ pub(crate) fn quota_meters(
                 (month_start(now), next_month_start(now))
             };
             Some(Meter {
+                id: format!("model:{model}"),
                 label: model.clone(),
                 percent: Some(used / q.tokens * 100.0),
                 used: Some(used),
@@ -420,7 +421,10 @@ fn plan_quota(plan: &str) -> &'static str {
 pub(crate) fn rate_limit_meters(h: &reqwest::header::HeaderMap) -> Vec<Meter> {
     let num = |name: &str| h.get(name).and_then(|v| v.to_str().ok()).and_then(|s| s.trim().parse::<f64>().ok());
     let mut out = vec![];
-    for (suffix, label, unit) in [("requests", "Peticiones (ventana)", "req"), ("tokens", "Tokens (ventana)", "tokens")] {
+    for (suffix, id, label, unit) in [
+        ("requests", "rate_requests", "Peticiones (ventana)", "req"),
+        ("tokens", "rate_tokens", "Tokens (ventana)", "tokens"),
+    ] {
         let (Some(limit), Some(remaining)) = (
             num(&format!("x-ratelimit-limit-{suffix}")),
             num(&format!("x-ratelimit-remaining-{suffix}")),
@@ -432,6 +436,7 @@ pub(crate) fn rate_limit_meters(h: &reqwest::header::HeaderMap) -> Vec<Meter> {
         }
         let used = (limit - remaining).max(0.0);
         out.push(Meter {
+            id: id.into(),
             label: label.into(),
             percent: Some(used / limit * 100.0),
             used: Some(used),
@@ -458,6 +463,7 @@ pub(crate) fn pointer_meter(body: &Value, cfg: &NanConfig) -> Option<Meter> {
     let used = cfg.used_pointer.as_deref().and_then(|p| body.pointer(p)).and_then(num)?;
     let limit = cfg.limit_pointer.as_deref().and_then(|p| body.pointer(p)).and_then(num);
     Some(Meter {
+        id: "custom".into(),
         label: cfg.usage_label.clone().filter(|s| !s.trim().is_empty()).unwrap_or_else(|| "Consumo".into()),
         percent: limit.filter(|l| *l > 0.0).map(|l| used / l * 100.0),
         used: Some(used),
@@ -494,6 +500,7 @@ mod tests {
         assert_eq!(month.per_day.len(), 2);
         let meters = quota_meters(&month, &summarize(&[page], None), &known_quotas().into_iter().map(|(k, v)| (k.to_string(), v)).collect(), now(), 1);
         assert_eq!(meters[0].label, "deepseek-v4-flash");
+        assert_eq!(meters[0].id, "model:deepseek-v4-flash");
         assert_eq!(meters[0].percent, Some(20.0));
         assert_eq!(meters[0].resets_at.as_deref(), Some("2026-11-01T00:00:00+00:00"));
     }
@@ -534,6 +541,17 @@ mod tests {
         let m = rate_limit_meters(&h);
         assert_eq!(m.len(), 1);
         assert_eq!(m[0].percent, Some(25.0));
+        assert_eq!(m[0].id, "rate_requests");
+        assert_eq!(m[0].label, "Peticiones (ventana)");
+    }
+
+    #[test]
+    fn token_rate_limit_has_its_own_id() {
+        let mut h = HeaderMap::new();
+        h.insert("x-ratelimit-limit-tokens", HeaderValue::from_static("1000"));
+        h.insert("x-ratelimit-remaining-tokens", HeaderValue::from_static("500"));
+        let m = rate_limit_meters(&h);
+        assert_eq!((m[0].id.as_str(), m[0].label.as_str()), ("rate_tokens", "Tokens (ventana)"));
     }
 
     #[test]
@@ -546,5 +564,17 @@ mod tests {
         let m = pointer_meter(&json!({"usage": {"used": "750000000", "quota": 3000000000u64}}), &cfg).unwrap();
         assert_eq!(m.percent, Some(25.0));
         assert!(pointer_meter(&json!({}), &cfg).is_none());
+        assert_eq!((m.id.as_str(), m.label.as_str()), ("custom", "Consumo"));
+    }
+
+    #[test]
+    fn custom_label_does_not_change_the_custom_id() {
+        let cfg = NanConfig {
+            used_pointer: Some("/u".into()),
+            usage_label: Some("Mi cuota".into()),
+            ..Default::default()
+        };
+        let m = pointer_meter(&json!({"u": 1}), &cfg).unwrap();
+        assert_eq!((m.id.as_str(), m.label.as_str()), ("custom", "Mi cuota"));
     }
 }

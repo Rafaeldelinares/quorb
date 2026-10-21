@@ -28,7 +28,7 @@ const white = '#ffffff';
 const accent = 'var(--popup-primary, #ff0036)';
 const palette = (n: number) => `var(--ring-${n})`;
 const meter = (label: string, windowSeconds: number, percent: number | null = 25): Meter => ({
-  label, windowSeconds, percent, used: null, limit: null, unit: null,
+  id: '', label, windowSeconds, percent, used: null, limit: null, unit: null,
   resetsAt: '2099-01-01T00:00:00Z',
 });
 const report = (meters: Meter[], id = 'codex:work', kind: UsageReport['kind'] = 'subscription'): UsageReport => ({

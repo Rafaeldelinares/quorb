@@ -26,6 +26,9 @@ export type AlertMemory = Record<string, 'exceeded'>;
 
 const TEN_MIN = 10 * 60_000;
 
+/** Identidad estable del medidor: su id, o la etiqueta en datos antiguos sin id. */
+const meterKey = (m: { id: string; label: string }) => m.id || m.label;
+
 /** Identifica la ventana por su reinicio, redondeado a 10 min (el endpoint lo devuelve con algo de baile). */
 export function windowKey(resetsAt: string | null): string {
   const t = resetsAt ? Date.parse(resetsAt) : NaN;
@@ -57,15 +60,17 @@ export function detectAlerts(
       const ev = { providerId: r.id, providerName: r.name, label: m.label, percent: pct };
 
       // 1. Límite superado (una vez por ventana)
-      const key = `${r.id}|${m.label}|${windowKey(m.resetsAt)}`;
-      if (pct >= cfg.threshold && !mem[key]) {
+      const key = `${r.id}|${meterKey(m)}|${windowKey(m.resetsAt)}`;
+      // La memoria guardada antes de existir los ids usaba la etiqueta: no repetir ese aviso.
+      const legacyKey = `${r.id}|${m.label}|${windowKey(m.resetsAt)}`;
+      if (pct >= cfg.threshold && !mem[key] && !mem[legacyKey]) {
         events.push({ kind: 'exceeded', ...ev });
         mem[key] = 'exceeded';
       }
 
       // 2. Reinicio de un límite que estaba superado
       if (!cfg.onReset) continue;
-      const old = prevById.get(r.id)?.meters.find((x) => x.label === m.label);
+      const old = prevById.get(r.id)?.meters.find((x) => meterKey(x) === meterKey(m));
       if (!old || old.percent == null || old.percent < cfg.threshold) continue;
       const newWindow = old.resetsAt != null && windowKey(old.resetsAt) !== windowKey(m.resetsAt);
       const dropped = old.percent - pct >= 30;

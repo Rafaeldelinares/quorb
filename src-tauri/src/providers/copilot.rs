@@ -64,6 +64,7 @@ pub async fn fetch(cfg: &CopilotConfig, who: Who<'_>, http: &reqwest::Client) ->
     let allowance = cfg.custom_allowance.map(f64::from).filter(|a| *a > 0.0).or(default_allowance);
     let (reset, window) = month_window(now);
     report.meters.push(Meter {
+        id: "premium_requests".into(),
         label: "Peticiones premium".into(),
         percent: allowance.map(|a| usage.requests / a * 100.0),
         used: Some(usage.requests),

@@ -117,7 +117,7 @@ export function ProviderDetails({ report }: { report: UsageReport }) {
     // History includes every percentage quota, not just the gauge's visible rings.
     const pct = ringMeters.map((m, i) => ({
       color: popupMeterColor(report, m, i),
-      points: samples.filter((s) => s.l === m.label).map((s) => [s.t, s.v] as [number, number]),
+      points: samples.filter((s) => s.l === m.id || s.l === m.label).map((s) => [s.t, s.v] as [number, number]),
     }));
     const spend = samples.filter((s) => s.l === 'spend').map((s) => [s.t, s.v] as [number, number]);
     return { pct, spend };
@@ -141,7 +141,7 @@ export function ProviderDetails({ report }: { report: UsageReport }) {
             <path d="M12 17h.01" />
           </svg>
           <span className="eg-notice__text">
-            <b>A este ritmo</b> {shortLabel(risk.m.label)} se agota{risk.pace.exhaustAt ? ` ${untilText(risk.pace.exhaustAt)}` : ''}, antes del reinicio.
+            <b>A este ritmo</b> {shortLabel(risk.m.label, risk.m.id)} se agota{risk.pace.exhaustAt ? ` ${untilText(risk.pace.exhaustAt)}` : ''}, antes del reinicio.
           </span>
         </div>
       )}
@@ -156,9 +156,9 @@ export function ProviderDetails({ report }: { report: UsageReport }) {
           {paces.map(
             ({ m, color, pace }) =>
               pace && (
-                <div key={m.label} className="pace" data-status={pace.status}>
+                <div key={m.id || m.label} className="pace" data-status={pace.status}>
                   <span className="pace__row">
-                    <span className="pace__label">{shortLabel(m.label)}</span>
+                    <span className="pace__label">{shortLabel(m.label, m.id)}</span>
                     <span className="pace__txt">{paceText(pace)}</span>
                   </span>
                   <PaceBar pace={pace} color={color} />

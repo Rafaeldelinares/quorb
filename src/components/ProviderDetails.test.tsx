@@ -24,7 +24,7 @@ describe('provider detail sections', () => {
       const html = renderToStaticMarkup(<Component report={{
         ...report,
         meters: windows.map((windowSeconds, i) => ({
-          label: `Limit ${i + 1}`, percent: 20, used: null, limit: null, unit: null,
+          id: '', label: `Limit ${i + 1}`, percent: 20, used: null, limit: null, unit: null,
           windowSeconds, resetsAt: new Date(Date.now() + windowSeconds * 500).toISOString(),
         })),
       }} />);
@@ -72,7 +72,7 @@ describe('provider detail sections', () => {
 
   it('keeps the risk notice outside both disclosures', () => {
     const html = renderToStaticMarkup(<ProviderDetails report={{ ...report, meters: [{
-      label: 'Semana', percent: 99, used: null, limit: null, unit: null,
+      id: '', label: 'Semana', percent: 99, used: null, limit: null, unit: null,
       windowSeconds: 604800, resetsAt: new Date(Date.now() + 302400000).toISOString(),
     }] }} />);
     expect(html).toContain('A este ritmo');
