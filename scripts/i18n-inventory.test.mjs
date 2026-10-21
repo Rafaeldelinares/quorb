@@ -155,6 +155,15 @@ test('CLI writes a reproducible inventory and --check detects drift', () => {
   }
 });
 
+test('CI checks the committed inventory after installing dependencies (#155)', () => {
+  const root = path.resolve(path.dirname(SCRIPT), '..');
+  const workflow = fs.readFileSync(path.join(root, '.github/workflows/ci.yml'), 'utf8').replace(/\r\n/g, '\n');
+  const install = workflow.indexOf('run: npm ci');
+  const check = workflow.indexOf('run: node scripts/i18n-inventory.mjs --check');
+  assert.ok(install >= 0, 'ci.yml installs dependencies');
+  assert.ok(check > install, 'ci.yml runs the inventory --check after npm ci');
+});
+
 test('CLI rejects unknown arguments without writing', () => {
   const dir = makeRepo();
   try {

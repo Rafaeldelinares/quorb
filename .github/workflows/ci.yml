@@ -41,6 +41,9 @@ jobs:
       - name: Frontend and script tests
         run: npm test
 
+      - name: i18n text inventory is up to date
+        run: node scripts/i18n-inventory.mjs --check
+
       - name: Typecheck and build
         run: npm run build
 

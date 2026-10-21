@@ -10,7 +10,8 @@
 //
 //   node scripts/i18n-inventory.mjs [--ref <commit>] [--out <file>] [--check]
 //
-// `--check` regenerates in memory and exits 1 when <file> differs.
+// `--check` regenerates in memory and exits 1 when <file> differs. CI runs it
+// (.github/workflows/ci.yml, #155); see CONTRIBUTING.md for the convention.
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
