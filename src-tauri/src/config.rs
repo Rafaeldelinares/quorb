@@ -427,8 +427,9 @@ pub struct ApiCostConfig {
     pub monthly_budget_usd: Option<f64>,
 }
 
-/// MiniMax. `base_url` cubre las dos regiones: global `api.minimax.io` y
-/// China `api.minimaxi.com`. Cualquier otro host equivalente sirve igual.
+/// MiniMax. `base_url` cubre las dos regiones: global `www.minimax.io` y
+/// China `www.minimaxi.com` (el host que usa la documentación oficial del
+/// Token Plan). Cualquier otro host equivalente sirve igual.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(default, rename_all = "camelCase")]
 pub struct MiniMaxConfig {
@@ -438,7 +439,7 @@ pub struct MiniMaxConfig {
 
 impl Default for MiniMaxConfig {
     fn default() -> Self {
-        Self { enabled: false, base_url: "https://api.minimax.io".into() }
+        Self { enabled: false, base_url: "https://www.minimax.io".into() }
     }
 }
 

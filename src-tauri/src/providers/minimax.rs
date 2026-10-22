@@ -106,22 +106,59 @@ fn timestamp(v: Option<&Value>) -> Option<i64> {
     num(v).map(|n| n as i64)
 }
 
+/// Las dos ventanas del Token Plan. Los nombres de campo son los del endpoint
+/// `/v1/token_plan/remains`.
+struct Window {
+    id: &'static str,
+    label: &'static str,
+    used: &'static str,
+    total: &'static str,
+    start: &'static str,
+    end: &'static str,
+}
+
+const WINDOWS: [Window; 2] = [
+    Window {
+        id: "token_plan_5h",
+        label: "Plan · 5 horas",
+        used: "current_interval_usage_count",
+        total: "current_interval_total_count",
+        start: "current_interval_start_time",
+        end: "current_interval_end_time",
+    },
+    Window {
+        id: "token_plan_weekly",
+        label: "Plan · semanal",
+        used: "current_weekly_usage_count",
+        total: "current_weekly_total_count",
+        start: "current_weekly_start_time",
+        end: "current_weekly_end_time",
+    },
+];
+
 pub(crate) fn parse(plan: &Value, balance: Option<&Value>) -> Parsed {
     let mut meters = vec![];
 
-    // El porcentaje sale de `usage / total`, nunca de `remains`: según
-    // MiniMax-AI/cli#104, `current_interval_usage_count` es el **consumo**, y
-    // `current_interval_remains_count` es lo que queda (y además no está en
-    // todos los payloads). Confundir ambos invierte el anillo.
-    let used = num(plan.get("current_interval_usage_count"));
-    let total = num(plan.get("current_interval_total_count"));
-    if let Some(limit) = total.filter(|t| *t > 0.0) {
+    // El Token Plan tiene **dos ventanas**: una de 5 horas (`current_interval_*`)
+    // y otra semanal (`current_weekly_*`). Se emiten las dos: con una sola, el
+    // anillo miente cuando la de 5 h va sobrada y la semana va al límite.
+    //
+    // El porcentaje sale de `usage / total`, nunca de `remains`. La lectura de
+    // estos campos depende del endpoint: en el viejo `/coding_plan/remains`,
+    // `current_interval_usage_count` era lo que **quedaba** (MiniMax-AI/MiniMax-M2#99),
+    // y al migrar a `/v1/token_plan/remains` pasó a ser el **consumo**
+    // (MiniMax-AI/cli#104, «`current_interval_usage_count` is used count, not
+    // remaining»). Aquí se usa la del endpoint actual; equivocarse invierte el anillo.
+    for window in WINDOWS {
+        let used = num(plan.get(window.used));
+        let total = num(plan.get(window.total));
+        let Some(limit) = total.filter(|t| *t > 0.0) else { continue };
         let spent = used.unwrap_or(0.0);
-        let start = timestamp(plan.get("current_interval_start_time"));
-        let end = timestamp(plan.get("current_interval_end_time"));
+        let start = timestamp(plan.get(window.start));
+        let end = timestamp(plan.get(window.end));
         meters.push(Meter {
-            id: "token_plan".into(),
-            label: "Uso del plan".into(),
+            id: window.id.into(),
+            label: window.label.into(),
             percent: Some(spent / limit * 100.0),
             used: Some(spent),
             limit: Some(limit),
@@ -147,10 +184,21 @@ pub(crate) fn parse(plan: &Value, balance: Option<&Value>) -> Parsed {
         });
     }
 
-    let message = match (meters.first().and_then(|m| m.limit), available) {
-        (Some(total), Some(balance)) => Some(format!("Plan {:.0}/{:.0} · saldo {balance:.2} $", used.unwrap_or(0.0), total)),
-        (Some(total), None) => Some(format!("Plan {:.0}/{:.0}", used.unwrap_or(0.0), total)),
-        _ => None,
+    // El mensaje resume la ventana **peor**: con dos ventanas, decir solo la de
+    // 5 h hides que la semana está al límite.
+    let worst = meters
+        .iter()
+        .filter(|m| m.percent.is_some())
+        .max_by(|a, b| a.percent.partial_cmp(&b.percent).unwrap_or(std::cmp::Ordering::Equal));
+    let plan = match worst {
+        Some(m) => Some(format!("{} {:.0}/{:.0}", m.label, m.used.unwrap_or(0.0), m.limit.unwrap_or(0.0))),
+        None => None,
+    };
+    let message = match (plan, available) {
+        (Some(plan), Some(balance)) => Some(format!("{plan} · saldo {balance:.2} $")),
+        (Some(plan), None) => Some(plan),
+        (None, Some(balance)) => Some(format!("Saldo {balance:.2} $")),
+        (None, None) => None,
     };
     Parsed { meters, message }
 }
@@ -177,13 +225,26 @@ mod tests {
             "current_interval_remains_count": 7500,
         })), None);
         let meter = &p.meters[0];
-        assert_eq!(meter.id, "token_plan");
+        assert_eq!(meter.id, "token_plan_5h");
         assert_eq!(meter.percent, Some(25.0));
         assert_eq!(meter.used, Some(2500.0));
         assert_eq!(meter.limit, Some(10000.0));
         // El anillo debe ser el consumo, no lo que queda.
         assert_ne!(meter.percent, Some(75.0));
-        assert_eq!(p.meters.len(), 1, "sin saldo no puede inventarse un segundo medidor");
+        assert_eq!(p.meters.len(), 1, "sin ventana semanal ni saldo solo se emite la de 5 h");
+    }
+
+    #[test]
+    fn emits_both_token_plan_windows_independently() {
+        let p = parse(&ok(json!({
+            "current_interval_usage_count": 2500, "current_interval_total_count": 10000,
+            "current_weekly_usage_count": 9000, "current_weekly_total_count": 10000,
+        })), None);
+        assert_eq!(p.meters.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["token_plan_5h", "token_plan_weekly"]);
+        assert_eq!(p.meters[0].percent, Some(25.0));
+        // Con la semana al 90 % y la ventana de 5 h al 25 %, el anillo tiene que
+        // mirar a la peor: el anillo es único y solo puede mentir si elige mal.
+        assert_eq!(p.meters[1].percent, Some(90.0));
     }
 
     #[test]
@@ -211,7 +272,7 @@ mod tests {
         assert_eq!(p.meters[1].percent, None, "un saldo no es un porcentaje consumido");
         assert_eq!(p.meters[1].used, Some(12.50));
         assert_eq!(p.meters[1].unit.as_deref(), Some("USD"));
-        assert_eq!(p.message.as_deref(), Some("Plan 1/4 · saldo 12.50 $"));
+        assert_eq!(p.message.as_deref(), Some("Plan · 5 horas 1/4 · saldo 12.50 $"));
     }
 
     #[test]
@@ -222,7 +283,7 @@ mod tests {
             assert_eq!(p.meters.len(), 1, "el fallo del saldo no puede degradar el anillo del plan");
             assert_eq!(p.meters[0].percent, Some(50.0));
         }
-        assert_eq!(parse(&plan, None).message.as_deref(), Some("Plan 3/6"));
+        assert_eq!(parse(&plan, None).message.as_deref(), Some("Plan · 5 horas 3/6"));
     }
 
     #[test]
@@ -240,11 +301,17 @@ mod tests {
         let p = parse(&ok(json!({
             "current_interval_usage_count": 5,
             "current_interval_total_count": 10,
+            "current_weekly_usage_count": 1,
+            "current_weekly_total_count": 10,
             "current_interval_start_time": 1_735_689_600, // 2025-01-01T00:00:00Z
-            "current_interval_end_time": 1_738_368_000,   // 2025-02-01T00:00:00Z
+            "current_interval_end_time": 1_735_707_600,   // +5 h
+            "current_weekly_start_time": 1_735_516_800, // 2024-12-30T00:00:00Z
+            "current_weekly_end_time": 1_736_121_600,   // 2025-01-06T00:00:00Z
         })), None);
-        assert_eq!(p.meters[0].window_seconds, Some(2_678_400));
-        assert_eq!(p.meters[0].resets_at.as_deref(), Some("2025-02-01T00:00:00+00:00"));
+        assert_eq!(p.meters[0].window_seconds, Some(18_000));
+        assert_eq!(p.meters[0].resets_at.as_deref(), Some("2025-01-01T05:00:00+00:00"));
+        assert_eq!(p.meters[1].window_seconds, Some(604_800));
+        assert_eq!(p.meters[1].resets_at.as_deref(), Some("2025-01-06T00:00:00+00:00"));
         // Sin marcas de tiempo el medidor sigue siendo válido, solo pierde el reinicio.
         let sin_ventana = parse(&ok(json!({"current_interval_usage_count": 5, "current_interval_total_count": 10})), None);
         assert!(sin_ventana.meters[0].resets_at.is_none() && sin_ventana.meters[0].window_seconds.is_none());
