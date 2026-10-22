@@ -44,12 +44,21 @@ pub async fn fetch(cfg: &MiniMaxConfig, who: Who<'_>, http: &reqwest::Client) ->
     // «lo configuré y falló»: sin eso el usuario no tiene forma de saberlo.
     let payg_key = who.secret(secrets::MINIMAX_API_KEY);
     let balance = match payg_key.as_deref() {
-        Some(api_key) => balance(http, &base, api_key).await,
+        Some(api_key) => balance(http, base, api_key).await,
         None => None,
     };
 
     let mut report = report;
     let parsed = parse(&plan, balance.as_ref(), payg_key.is_some());
+    // Un informe sin medidores y sin mensaje no dice nada: sería un orbe en cero
+    // que el usuario lee como «no he consumido». Si MiniMax renombra los campos,
+    // esto lo delata en vez de fallar en silencio.
+    if parsed.meters.is_empty() && parsed.message.is_none() {
+        return report.fail(
+            Status::Warning,
+            "MiniMax respondió bien pero su formato no coincide con el que se espera; puede haber cambiado el contrato.",
+        );
+    }
     report.meters = parsed.meters;
     report.message = parsed.message;
     report
@@ -105,73 +114,81 @@ fn num(v: Option<&Value>) -> Option<f64> {
     v.and_then(|x| x.as_f64().or_else(|| x.as_str().and_then(|s| s.trim().parse().ok())))
 }
 
-fn timestamp(v: Option<&Value>) -> Option<i64> {
-    num(v).map(|n| n as i64)
-}
 
-/// Las dos ventanas del Token Plan. Los nombres de campo son los del endpoint
-/// `/v1/token_plan/remains`.
+/// Las dos ventanas del Token Plan.
+///
+/// Campos **del payload real** (GET `/v1/token_plan/remains`), no de documentación:
+/// los contadores vienen dentro de `model_remains[]`, uno por categoría de modelo
+/// (`general`, `video`…), y el campo fiable es `current_*_remaining_percent`, un
+/// porcentaje **restante**. Los contadores `_usage_count` / `_total_count` no sirven:
+/// en `general` vienen a 0 mientras el porcentaje restante dice 81, así que dividir
+/// uno por otro daría 0 % con el 19 % consumido.
 struct Window {
     id: &'static str,
     label: &'static str,
-    used: &'static str,
-    total: &'static str,
+    remaining: &'static str,
     start: &'static str,
     end: &'static str,
 }
 
 const WINDOWS: [Window; 2] = [
     Window {
-        id: "token_plan_5h",
-        label: "Plan · 5 horas",
-        used: "current_interval_usage_count",
-        total: "current_interval_total_count",
-        start: "current_interval_start_time",
-        end: "current_interval_end_time",
+        id: "5h",
+        label: "5 h",
+        remaining: "current_interval_remaining_percent",
+        start: "start_time",
+        end: "end_time",
     },
     Window {
-        id: "token_plan_weekly",
-        label: "Plan · semanal",
-        used: "current_weekly_usage_count",
-        total: "current_weekly_total_count",
-        start: "current_weekly_start_time",
-        end: "current_weekly_end_time",
+        id: "weekly",
+        label: "semanal",
+        remaining: "current_weekly_remaining_percent",
+        start: "weekly_start_time",
+        end: "weekly_end_time",
     },
 ];
+
+/// MiniMax manda los tiempos en **milisegundos** desde epoch. Con segundos, una
+/// ventana de 2026 caería en el año 58.000.
+fn millis(v: Option<&Value>) -> Option<i64> {
+    num(v).map(|n| (n / 1000.0) as i64)
+}
 
 pub(crate) fn parse(plan: &Value, balance: Option<&Value>, payg_configured: bool) -> Parsed {
     let mut meters = vec![];
 
-    // El Token Plan tiene **dos ventanas**: una de 5 horas (`current_interval_*`)
-    // y otra semanal (`current_weekly_*`). Se emiten las dos: con una sola, el
-    // anillo miente cuando la de 5 h va sobrada y la semana va al límite.
+    // El payload real trae `model_remains[]`: **una entrada por categoría de
+    // modelo**, no una barra compartida. Por eso el id del medidor lleva el
+    // nombre del modelo: `general` y `video` consumen cuotas distintas y hay que
+    // poder distinguirlos en el popup y en el historial.
     //
-    // El porcentaje sale de `usage / total`, nunca de `remains`. La lectura de
-    // estos campos depende del endpoint: en el viejo `/coding_plan/remains`,
-    // `current_interval_usage_count` era lo que **quedaba** (MiniMax-AI/MiniMax-M2#99),
-    // y al migrar a `/v1/token_plan/remains` pasó a ser el **consumo**
-    // (MiniMax-AI/cli#104, «`current_interval_usage_count` is used count, not
-    // remaining»). Aquí se usa la del endpoint actual; equivocarse invierte el anillo.
-    for window in WINDOWS {
-        let used = num(plan.get(window.used));
-        let total = num(plan.get(window.total));
-        let Some(limit) = total.filter(|t| *t > 0.0) else { continue };
-        let spent = used.unwrap_or(0.0);
-        let start = timestamp(plan.get(window.start));
-        let end = timestamp(plan.get(window.end));
-        meters.push(Meter {
-            id: window.id.into(),
-            label: window.label.into(),
-            // Saturado aquí, y no solo en el anillo: un payload con
-            // `usage > total` (ciclo mal cerrado) no debe colarse al popup ni
-            // quedar persistido en el historial para siempre.
-            percent: Some((spent / limit * 100.0).clamp(0.0, 100.0)),
-            used: Some(spent),
-            limit: Some(limit),
-            unit: None,
-            resets_at: end.and_then(|at| chrono::DateTime::from_timestamp(at, 0)).map(|at| at.to_rfc3339()),
-            window_seconds: start.zip(end).map(|(s, e)| e - s),
-        });
+    // El porcentaje sale de `100 - current_*_remaining_percent`, que es un
+    // **restante**. Los contadores `_usage_count` / `_total_count` existen pero no
+    // son fiables (en `general` vienen a 0 con el 81 % restante), así que
+    // dividirlos daría un anillo en cero con la cuota realmente consumida.
+    for entry in plan.get("model_remains").and_then(Value::as_array).into_iter().flatten() {
+        let Some(model) = entry.get("model_name").and_then(Value::as_str) else { continue };
+        let slug: String = model
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '_' })
+            .collect();
+        for window in WINDOWS {
+            let Some(remaining) = num(entry.get(window.remaining)) else { continue };
+            let start = millis(entry.get(window.start));
+            let end = millis(entry.get(window.end));
+            meters.push(Meter {
+                id: format!("token_plan_{slug}_{}", window.id),
+                label: format!("{model} · {label}", label = window.label),
+                percent: Some((100.0 - remaining).clamp(0.0, 100.0)),
+                // El payload no trae totales en unidades utilizables, así que no
+                // se inventan `used`/`limit`: solo el porcentaje es verificable.
+                used: None,
+                limit: None,
+                unit: None,
+                resets_at: end.and_then(|at| chrono::DateTime::from_timestamp(at, 0)).map(|at| at.to_rfc3339()),
+                window_seconds: start.zip(end).map(|(s, e)| e - s),
+            });
+        }
     }
 
     // El saldo PAYG no es un porcentaje: no hay «total» contra el que medirlo.
@@ -190,19 +207,17 @@ pub(crate) fn parse(plan: &Value, balance: Option<&Value>, payg_configured: bool
         });
     }
 
-    // El mensaje resume la ventana **peor**: con dos ventanas, decir solo la de
-    // 5 h hides que la semana está al límite.
+    // El mensaje resume el **peor** medidor del plan, no el primero: con varias
+    // categorías de modelo y dos ventanas cada una, decir solo el primero esconde
+    // el que está al límite.
     let worst = meters
         .iter()
         .filter(|m| m.percent.is_some())
         .max_by(|a, b| a.percent.partial_cmp(&b.percent).unwrap_or(std::cmp::Ordering::Equal));
-    let plan = match worst {
-        Some(m) => Some(format!("{} {:.0}/{:.0}", m.label, m.used.unwrap_or(0.0), m.limit.unwrap_or(0.0))),
-        None => None,
-    };
+    let plan = worst.map(|m| format!("{} {:.0}%", m.label, m.percent.unwrap_or(0.0)));
     // Con la API key puesta y el saldo sin llegar, el usuario no puede
     // distinguir «no lo configuré» de «lo configuré y falla». Decírselo es la
-    // diferencia entre depurar una clave ycreer que MiniMax no publishes saldo.
+    // diferencia entre depurar una clave y pensar que MiniMax no publica el saldo.
     let saldo = match available {
         Some(balance) => Some(format!("saldo {balance:.2} $")),
         None if payg_configured => Some("saldo no disponible".to_string()),
@@ -222,8 +237,8 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    /// Envuelve el payload **en el mismo nivel** que `base_resp`, como lo hace
-    /// MiniMax: los campos del plan son hermanos del sobre, no hijos suyos.
+    /// Envuelve un cuerpo **en el mismo nivel** que `base_resp`, como lo hace
+    /// MiniMax: `model_remains` y el sobre son hermanos.
     fn ok(mut body: Value) -> Value {
         body.as_object_mut()
             .expect("el fixture debe ser un objeto")
@@ -231,59 +246,74 @@ mod tests {
         body
     }
 
-    #[test]
-    fn derives_the_percentage_from_usage_over_total_never_from_remains() {
-        let p = parse(&ok(json!({
-            "current_interval_usage_count": 2500,
-            "current_interval_total_count": 10000,
-            "current_interval_remains_count": 7500,
-        })), None, false);
-        let meter = &p.meters[0];
-        assert_eq!(meter.id, "token_plan_5h");
-        assert_eq!(meter.percent, Some(25.0));
-        assert_eq!(meter.used, Some(2500.0));
-        assert_eq!(meter.limit, Some(10000.0));
-        // El anillo debe ser el consumo, no lo que queda.
-        assert_ne!(meter.percent, Some(75.0));
-        assert_eq!(p.meters.len(), 1, "sin ventana semanal ni saldo solo se emite la de 5 h");
+    /// **Payload real** de `GET /v1/token_plan/remains` con una Subscription Key
+    /// válida,recortado a los campos que el parser usa. Reproduce los tres rasgos
+    /// que rompían el parser anterior: los datos viven en `model_remains[]`, hay
+    /// una entrada por categoría de modelo, y los contadores vienen a 0 mientras
+    /// el porcentaje restante dice otra cosa.
+    fn real() -> Value {
+        json!({
+            "model_remains": [
+                {
+                    "start_time": 1_792_681_200_000i64, "end_time": 1_792_699_200_000i64,
+                    "remains_time": 4_587_190,
+                    "current_interval_total_count": 0, "current_interval_usage_count": 0,
+                    "model_name": "general",
+                    "current_weekly_total_count": 0, "current_weekly_usage_count": 0,
+                    "weekly_start_time": 1_792_368_000_000i64, "weekly_end_time": 1_792_972_800_000i64,
+                    "current_interval_status": 1, "current_interval_remaining_percent": 81,
+                    "current_weekly_status": 1, "current_weekly_remaining_percent": 95
+                },
+                {
+                    "start_time": 1_792_627_200_000i64, "end_time": 1_792_713_600_000i64,
+                    "current_interval_total_count": 3, "current_interval_usage_count": 0,
+                    "model_name": "video",
+                    "current_weekly_total_count": 21, "current_weekly_usage_count": 0,
+                    "current_interval_remaining_percent": 100,
+                    "current_weekly_remaining_percent": 100
+                }
+            ],
+            "base_resp": { "status_code": 0, "status_msg": "success" }
+        })
     }
 
     #[test]
-    fn emits_both_token_plan_windows_independently() {
-        let p = parse(&ok(json!({
-            "current_interval_usage_count": 2500, "current_interval_total_count": 10000,
-            "current_weekly_usage_count": 9000, "current_weekly_total_count": 10000,
-        })), None, false);
-        assert_eq!(p.meters.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["token_plan_5h", "token_plan_weekly"]);
-        assert_eq!(p.meters[0].percent, Some(25.0));
-        // Con la semana al 90 % y la ventana de 5 h al 25 %, el anillo tiene que
-        // mirar a la peor: el anillo es único y solo puede mentir si elige mal.
-        assert_eq!(p.meters[1].percent, Some(90.0));
+    fn lee_el_porcentaje_del_payload_real_y_no_de_los_contadores_a_cero() {
+        let p = parse(&real(), None, false);
+        // Los contadores de `general` valen 0/0; si el parser los usara daría 0 %.
+        let general = p.meters.iter().find(|m| m.id == "token_plan_general_5h").expect("medidor de general");
+        assert_eq!(general.percent, Some(19.0), "81 % restante = 19 % consumido");
+        assert_eq!(general.used, None, "el payload no da totales en unidades utilizables");
+        assert_eq!(general.limit, None);
+        // 5 h y semanal, por cada categoría.
+        assert_eq!(
+            p.meters.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+            ["token_plan_general_5h", "token_plan_general_weekly", "token_plan_video_5h", "token_plan_video_weekly"]
+        );
+        assert_eq!(p.meters.iter().find(|m| m.id == "token_plan_general_weekly").unwrap().percent, Some(5.0));
+        assert_eq!(p.meters.iter().find(|m| m.id == "token_plan_video_5h").unwrap().percent, Some(0.0));
+        // El peor medidor manda en el mensaje: general 5 h al 19 %, no video al 0 %.
+        assert_eq!(p.message.as_deref(), Some("general · 5 h 19%"));
     }
 
     #[test]
-    fn distinguishes_a_missing_balance_from_a_configured_one_that_failed() {
-        let plan = ok(json!({"current_interval_usage_count": 3, "current_interval_total_count": 6}));
-        // Sin API key: el usuario no pidió saldo, no hay nada que señalar.
-        assert_eq!(parse(&plan, None, false).message.as_deref(), Some("Plan · 5 horas 3/6"));
-        // Con API key y saldo caído: tiene que verse, o el usuario no puede
-        // distinguir «no lo configuré» de «lo configuré y falló».
-        assert_eq!(parse(&plan, None, true).message.as_deref(), Some("Plan · 5 horas 3/6 · saldo no disponible"));
-        // Sin ventanas de plan tampoco se pierde el aviso.
-        assert_eq!(parse(&ok(json!({})), None, true).message.as_deref(), Some("saldo no disponible"));
+    fn interpreta_los_tiempos_como_milisegundos() {
+        let p = parse(&real(), None, false);
+        let general = &p.meters[0];
+        assert_eq!(general.resets_at.as_deref(), Some("2026-10-22T20:00:00+00:00"));
+        assert_eq!(general.window_seconds, Some(18_000), "la ventana de 5 h son 5 horas, no 5 millones");
+        assert_eq!(p.meters[1].resets_at.as_deref(), Some("2026-10-26T00:00:00+00:00"));
     }
 
     #[test]
-    fn saturates_a_percentage_that_exceeds_the_total() {
-        // Ciclo mal cerrado o payload sucio: usage > total no puede pintar un
-        // anillo por encima de 100 ni quedar persistido así en el historial.
-        let p = parse(&ok(json!({
-            "current_interval_usage_count": 1500, "current_interval_total_count": 1000,
-        })), None, false);
-        assert_eq!(p.meters[0].percent, Some(100.0));
-        // El valor crudo se conserva: used/limit siguen diciendo la verdad.
-        assert_eq!(p.meters[0].used, Some(1500.0));
-        assert_eq!(p.meters[0].limit, Some(1000.0));
+    fn un_solo_modelo_no_inventa_los_demas() {
+        let p = parse(&real(), None, false);
+        // 4 medidores: 2 categorías x 2 ventanas. Ni uno de más.
+        assert_eq!(p.meters.len(), 4);
+        let vacio = parse(&json!({"model_remains": [], "base_resp": {"status_code": 0}}), None, false);
+        assert!(vacio.meters.is_empty());
+        let sin_array = parse(&ok(json!({})), None, false);
+        assert!(sin_array.meters.is_empty() && sin_array.message.is_none());
     }
 
     #[test]
@@ -292,68 +322,41 @@ mod tests {
         assert_eq!(envelope(&v).unwrap_err(), "MiniMax: invalid api key");
         let sin_mensaje = json!({"base_resp": {"status_code": 1008}});
         assert_eq!(envelope(&sin_mensaje).unwrap_err(), "MiniMax rechazó la consulta (status_code 1008)");
-        assert!(envelope(&ok(json!({}))).is_ok());
-        // Sin sobre no se afirma un éxito que no se pudo verificar.
-        assert!(envelope(&json!({"current_interval_total_count": 10})).is_err());
+        assert!(envelope(&real()).is_ok(), "una respuesta real de éxito trae base_resp con status_code 0");
+        assert!(envelope(&json!({"model_remains": []})).is_err(), "sin sobre no se afirma un éxito sin verificar");
         assert!(envelope(&json!({"base_resp": null})).is_err());
-        // Un sobre sin código no da veredicto en ninguna dirección.
-        assert!(envelope(&json!({"base_resp": {}})).is_ok());
+        assert!(envelope(&json!({"base_resp": {}})).is_ok(), "sin código no hay veredicto en ninguna dirección");
     }
 
     #[test]
-    fn payg_balance_is_a_value_meter_and_never_touches_the_ring() {
+    fn saldo_payg_es_un_valor_y_nunca_una_anillo() {
         let p = parse(
-            &ok(json!({"current_interval_usage_count": 1, "current_interval_total_count": 4})),
+            &real(),
             Some(&ok(json!({"available_amount": "12.50", "cash_balance": "10.00", "voucher_balance": "2.50"}))),
             true,
         );
-        assert_eq!(p.meters.len(), 2);
-        assert_eq!(p.meters[1].id, "payg_balance");
-        assert_eq!(p.meters[1].percent, None, "un saldo no es un porcentaje consumido");
-        assert_eq!(p.meters[1].used, Some(12.50));
-        assert_eq!(p.meters[1].unit.as_deref(), Some("USD"));
-        assert_eq!(p.message.as_deref(), Some("Plan · 5 horas 1/4 · saldo 12.50 $"));
+        let balance = p.meters.iter().find(|m| m.id == "payg_balance").expect("medidor de saldo");
+        assert_eq!(balance.percent, None, "un saldo no es un porcentaje consumido");
+        assert_eq!(balance.used, Some(12.50));
+        assert_eq!(balance.unit.as_deref(), Some("USD"));
+        assert_eq!(p.message.as_deref(), Some("general · 5 h 19% · saldo 12.50 $"));
     }
 
     #[test]
-    fn a_missing_or_unusable_balance_leaves_the_plan_report_intact() {
-        let plan = ok(json!({"current_interval_usage_count": 3, "current_interval_total_count": 6}));
-        for balance in [None, Some(&json!({})), Some(&ok(json!({"available_amount": null})))] {
-            let p = parse(&plan, balance, false);
-            assert_eq!(p.meters.len(), 1, "el fallo del saldo no puede degradar el anillo del plan");
-            assert_eq!(p.meters[0].percent, Some(50.0));
-        }
-        assert_eq!(parse(&plan, None, false).message.as_deref(), Some("Plan · 5 horas 3/6"));
+    fn distingue_saldo_sin_configurar_de_configurado_y_fallido() {
+        assert_eq!(parse(&real(), None, false).message.as_deref(), Some("general · 5 h 19%"));
+        assert_eq!(parse(&real(), None, true).message.as_deref(), Some("general · 5 h 19% · saldo no disponible"));
+        assert_eq!(parse(&ok(json!({"model_remains": []})), None, true).message.as_deref(), Some("saldo no disponible"));
     }
 
     #[test]
-    fn reads_amounts_as_strings_or_numbers_and_never_divides_by_zero() {
-        let as_string = parse(&ok(json!({"current_interval_usage_count": "40", "current_interval_total_count": "80"})), None, false);
-        assert_eq!(as_string.meters[0].percent, Some(50.0));
-        let sin_total = parse(&ok(json!({"current_interval_usage_count": 40, "current_interval_total_count": 0})), None, false);
-        assert!(sin_total.meters.is_empty(), "un total de 0 no produce un anillo indefinido");
-        let sin_datos = parse(&ok(json!({})), None, false);
-        assert!(sin_datos.meters.is_empty() && sin_datos.message.is_none());
-    }
-
-    #[test]
-    fn carries_the_interval_reset_and_window_when_minimax_sends_them() {
-        let p = parse(&ok(json!({
-            "current_interval_usage_count": 5,
-            "current_interval_total_count": 10,
-            "current_weekly_usage_count": 1,
-            "current_weekly_total_count": 10,
-            "current_interval_start_time": 1_735_689_600, // 2025-01-01T00:00:00Z
-            "current_interval_end_time": 1_735_707_600,   // +5 h
-            "current_weekly_start_time": 1_735_516_800, // 2024-12-30T00:00:00Z
-            "current_weekly_end_time": 1_736_121_600,   // 2025-01-06T00:00:00Z
-        })), None, false);
-        assert_eq!(p.meters[0].window_seconds, Some(18_000));
-        assert_eq!(p.meters[0].resets_at.as_deref(), Some("2025-01-01T05:00:00+00:00"));
-        assert_eq!(p.meters[1].window_seconds, Some(604_800));
-        assert_eq!(p.meters[1].resets_at.as_deref(), Some("2025-01-06T00:00:00+00:00"));
-        // Sin marcas de tiempo el medidor sigue siendo válido, solo pierde el reinicio.
-        let sin_ventana = parse(&ok(json!({"current_interval_usage_count": 5, "current_interval_total_count": 10})), None, false);
-        assert!(sin_ventana.meters[0].resets_at.is_none() && sin_ventana.meters[0].window_seconds.is_none());
+    fn satura_un_porcentaje_que_supera_el_rango() {
+        // Porcentaje restante negativo o > 100: el payload viene sucio.
+        let sucio = json!({"model_remains": [
+            {"model_name": "general", "current_interval_remaining_percent": -20, "current_weekly_remaining_percent": 140}
+        ], "base_resp": {"status_code": 0}});
+        let p = parse(&sucio, None, false);
+        assert_eq!(p.meters[0].percent, Some(100.0), "restante negativo satura a 100 % consumido");
+        assert_eq!(p.meters[1].percent, Some(0.0), "restante > 100 no produce un negativo");
     }
 }
