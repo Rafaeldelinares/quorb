@@ -55,7 +55,7 @@ export interface ApiCostConfig {
   monthlyBudgetUsd: number | null;
 }
 
-/** MiniMax. `baseUrl` cubre las dos regiones: global `www.minimax.io` y China `www.minimaxi.com`. */
+/** MiniMax. `baseUrl` cubre las dos regiones: global `api.minimax.io` y China `api.minimaxi.com`. */
 export interface MiniMaxConfig {
   enabled: boolean;
   baseUrl: string;

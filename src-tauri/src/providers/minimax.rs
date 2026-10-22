@@ -40,13 +40,16 @@ pub async fn fetch(cfg: &MiniMaxConfig, who: Who<'_>, http: &reqwest::Client) ->
 
     // El saldo PAYG va con otra clave y es un endpoint que no está en la
     // documentación pública oficial: si falla, el informe del plan sigue válido.
-    let balance = match who.secret(secrets::MINIMAX_API_KEY) {
-        Some(api_key) => balance(http, &base, &api_key).await,
+    // Guardamos si había clave para poder distinguir «no configuré el saldo» de
+    // «lo configuré y falló»: sin eso el usuario no tiene forma de saberlo.
+    let payg_key = who.secret(secrets::MINIMAX_API_KEY);
+    let balance = match payg_key.as_deref() {
+        Some(api_key) => balance(http, &base, api_key).await,
         None => None,
     };
 
     let mut report = report;
-    let parsed = parse(&plan, balance.as_ref());
+    let parsed = parse(&plan, balance.as_ref(), payg_key.is_some());
     report.meters = parsed.meters;
     report.message = parsed.message;
     report
@@ -136,7 +139,7 @@ const WINDOWS: [Window; 2] = [
     },
 ];
 
-pub(crate) fn parse(plan: &Value, balance: Option<&Value>) -> Parsed {
+pub(crate) fn parse(plan: &Value, balance: Option<&Value>, payg_configured: bool) -> Parsed {
     let mut meters = vec![];
 
     // El Token Plan tiene **dos ventanas**: una de 5 horas (`current_interval_*`)
@@ -159,7 +162,10 @@ pub(crate) fn parse(plan: &Value, balance: Option<&Value>) -> Parsed {
         meters.push(Meter {
             id: window.id.into(),
             label: window.label.into(),
-            percent: Some(spent / limit * 100.0),
+            // Saturado aquí, y no solo en el anillo: un payload con
+            // `usage > total` (ciclo mal cerrado) no debe colarse al popup ni
+            // quedar persistido en el historial para siempre.
+            percent: Some((spent / limit * 100.0).clamp(0.0, 100.0)),
             used: Some(spent),
             limit: Some(limit),
             unit: None,
@@ -194,10 +200,18 @@ pub(crate) fn parse(plan: &Value, balance: Option<&Value>) -> Parsed {
         Some(m) => Some(format!("{} {:.0}/{:.0}", m.label, m.used.unwrap_or(0.0), m.limit.unwrap_or(0.0))),
         None => None,
     };
-    let message = match (plan, available) {
-        (Some(plan), Some(balance)) => Some(format!("{plan} · saldo {balance:.2} $")),
+    // Con la API key puesta y el saldo sin llegar, el usuario no puede
+    // distinguir «no lo configuré» de «lo configuré y falla». Decírselo es la
+    // diferencia entre depurar una clave ycreer que MiniMax no publishes saldo.
+    let saldo = match available {
+        Some(balance) => Some(format!("saldo {balance:.2} $")),
+        None if payg_configured => Some("saldo no disponible".to_string()),
+        None => None,
+    };
+    let message = match (plan, saldo) {
+        (Some(plan), Some(saldo)) => Some(format!("{plan} · {saldo}")),
         (Some(plan), None) => Some(plan),
-        (None, Some(balance)) => Some(format!("Saldo {balance:.2} $")),
+        (None, Some(saldo)) => Some(saldo),
         (None, None) => None,
     };
     Parsed { meters, message }
@@ -223,7 +237,7 @@ mod tests {
             "current_interval_usage_count": 2500,
             "current_interval_total_count": 10000,
             "current_interval_remains_count": 7500,
-        })), None);
+        })), None, false);
         let meter = &p.meters[0];
         assert_eq!(meter.id, "token_plan_5h");
         assert_eq!(meter.percent, Some(25.0));
@@ -239,12 +253,37 @@ mod tests {
         let p = parse(&ok(json!({
             "current_interval_usage_count": 2500, "current_interval_total_count": 10000,
             "current_weekly_usage_count": 9000, "current_weekly_total_count": 10000,
-        })), None);
+        })), None, false);
         assert_eq!(p.meters.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["token_plan_5h", "token_plan_weekly"]);
         assert_eq!(p.meters[0].percent, Some(25.0));
         // Con la semana al 90 % y la ventana de 5 h al 25 %, el anillo tiene que
         // mirar a la peor: el anillo es único y solo puede mentir si elige mal.
         assert_eq!(p.meters[1].percent, Some(90.0));
+    }
+
+    #[test]
+    fn distinguishes_a_missing_balance_from_a_configured_one_that_failed() {
+        let plan = ok(json!({"current_interval_usage_count": 3, "current_interval_total_count": 6}));
+        // Sin API key: el usuario no pidió saldo, no hay nada que señalar.
+        assert_eq!(parse(&plan, None, false).message.as_deref(), Some("Plan · 5 horas 3/6"));
+        // Con API key y saldo caído: tiene que verse, o el usuario no puede
+        // distinguir «no lo configuré» de «lo configuré y falló».
+        assert_eq!(parse(&plan, None, true).message.as_deref(), Some("Plan · 5 horas 3/6 · saldo no disponible"));
+        // Sin ventanas de plan tampoco se pierde el aviso.
+        assert_eq!(parse(&ok(json!({})), None, true).message.as_deref(), Some("saldo no disponible"));
+    }
+
+    #[test]
+    fn saturates_a_percentage_that_exceeds_the_total() {
+        // Ciclo mal cerrado o payload sucio: usage > total no puede pintar un
+        // anillo por encima de 100 ni quedar persistido así en el historial.
+        let p = parse(&ok(json!({
+            "current_interval_usage_count": 1500, "current_interval_total_count": 1000,
+        })), None, false);
+        assert_eq!(p.meters[0].percent, Some(100.0));
+        // El valor crudo se conserva: used/limit siguen diciendo la verdad.
+        assert_eq!(p.meters[0].used, Some(1500.0));
+        assert_eq!(p.meters[0].limit, Some(1000.0));
     }
 
     #[test]
@@ -266,6 +305,7 @@ mod tests {
         let p = parse(
             &ok(json!({"current_interval_usage_count": 1, "current_interval_total_count": 4})),
             Some(&ok(json!({"available_amount": "12.50", "cash_balance": "10.00", "voucher_balance": "2.50"}))),
+            true,
         );
         assert_eq!(p.meters.len(), 2);
         assert_eq!(p.meters[1].id, "payg_balance");
@@ -279,20 +319,20 @@ mod tests {
     fn a_missing_or_unusable_balance_leaves_the_plan_report_intact() {
         let plan = ok(json!({"current_interval_usage_count": 3, "current_interval_total_count": 6}));
         for balance in [None, Some(&json!({})), Some(&ok(json!({"available_amount": null})))] {
-            let p = parse(&plan, balance);
+            let p = parse(&plan, balance, false);
             assert_eq!(p.meters.len(), 1, "el fallo del saldo no puede degradar el anillo del plan");
             assert_eq!(p.meters[0].percent, Some(50.0));
         }
-        assert_eq!(parse(&plan, None).message.as_deref(), Some("Plan · 5 horas 3/6"));
+        assert_eq!(parse(&plan, None, false).message.as_deref(), Some("Plan · 5 horas 3/6"));
     }
 
     #[test]
     fn reads_amounts_as_strings_or_numbers_and_never_divides_by_zero() {
-        let as_string = parse(&ok(json!({"current_interval_usage_count": "40", "current_interval_total_count": "80"})), None);
+        let as_string = parse(&ok(json!({"current_interval_usage_count": "40", "current_interval_total_count": "80"})), None, false);
         assert_eq!(as_string.meters[0].percent, Some(50.0));
-        let sin_total = parse(&ok(json!({"current_interval_usage_count": 40, "current_interval_total_count": 0})), None);
+        let sin_total = parse(&ok(json!({"current_interval_usage_count": 40, "current_interval_total_count": 0})), None, false);
         assert!(sin_total.meters.is_empty(), "un total de 0 no produce un anillo indefinido");
-        let sin_datos = parse(&ok(json!({})), None);
+        let sin_datos = parse(&ok(json!({})), None, false);
         assert!(sin_datos.meters.is_empty() && sin_datos.message.is_none());
     }
 
@@ -307,13 +347,13 @@ mod tests {
             "current_interval_end_time": 1_735_707_600,   // +5 h
             "current_weekly_start_time": 1_735_516_800, // 2024-12-30T00:00:00Z
             "current_weekly_end_time": 1_736_121_600,   // 2025-01-06T00:00:00Z
-        })), None);
+        })), None, false);
         assert_eq!(p.meters[0].window_seconds, Some(18_000));
         assert_eq!(p.meters[0].resets_at.as_deref(), Some("2025-01-01T05:00:00+00:00"));
         assert_eq!(p.meters[1].window_seconds, Some(604_800));
         assert_eq!(p.meters[1].resets_at.as_deref(), Some("2025-01-06T00:00:00+00:00"));
         // Sin marcas de tiempo el medidor sigue siendo válido, solo pierde el reinicio.
-        let sin_ventana = parse(&ok(json!({"current_interval_usage_count": 5, "current_interval_total_count": 10})), None);
+        let sin_ventana = parse(&ok(json!({"current_interval_usage_count": 5, "current_interval_total_count": 10})), None, false);
         assert!(sin_ventana.meters[0].resets_at.is_none() && sin_ventana.meters[0].window_seconds.is_none());
     }
 }
