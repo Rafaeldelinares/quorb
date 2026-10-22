@@ -367,12 +367,12 @@ html[data-window='detail'], html[data-window='detail'] body, html[data-window='d
 .dock[data-edge='left'] { --reveal-x: -100%; --reveal-y: 0px; --peek-angle: 90deg; }
 .dock[data-edge='right'] { --reveal-x: 100%; --reveal-y: 0px; --peek-angle: -90deg; }
 .dock[data-auto-hide] .strip { transition: transform 280ms cubic-bezier(0.4, 0, 0.2, 1), opacity 220ms ease; }
-.dock[data-auto-hide]:is([data-reveal='hidden'], [data-reveal='leaving-handle'], [data-reveal='preparing'], [data-reveal='closing'], [data-reveal='settling']) .strip {
+.dock[data-reveal='hidden'] .strip, .dock[data-reveal='leaving-handle'] .strip, .dock[data-reveal='preparing'] .strip, .dock[data-reveal='closing'] .strip, .dock[data-reveal='settling'] .strip {
   transform: translate(var(--reveal-x), var(--reveal-y)); opacity: 0; pointer-events: none;
 }
-.dock[data-auto-hide]:is([data-reveal='hidden'], [data-reveal='leaving-handle'], [data-reveal='preparing'], [data-reveal='settling']) .strip { visibility: hidden; }
-.dock[data-auto-hide][data-reveal='opening'] .strip { transform: translate(0, 0); opacity: 1; pointer-events: none; }
-.dock[data-auto-hide][data-reveal='open'] .strip { transform: translate(0, 0); opacity: 1; }
+.dock[data-reveal='hidden'] .strip, .dock[data-reveal='leaving-handle'] .strip, .dock[data-reveal='preparing'] .strip, .dock[data-reveal='settling'] .strip { visibility: hidden; }
+.dock[data-reveal='opening'] .strip { transform: translate(0, 0); opacity: 1; pointer-events: none; }
+.dock[data-reveal='open'] .strip { transform: translate(0, 0); opacity: 1; }
 .peek {
   position: absolute; z-index: 3; width: 48px; height: 24px; padding: 0; box-sizing: border-box;
   display: grid; place-items: center; overflow: hidden; cursor: pointer;

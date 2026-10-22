@@ -25,7 +25,14 @@ import { peekRect, usesPeekWindow, waitForViewport, watchPreparation } from './l
 import { useDockReveal } from './lib/useDockReveal';
 
 const CLOSE_DELAY = 280;
-const OPEN_DELAY = 350;
+/**
+ * En Linux el barrido accidental del puntero no tiene red de contención: el
+ * muestreo nativo de presencia (#154) solo existe en macOS, así que nada
+ * más allá del temporizador filtra el paso sobre otro orbe. 350 ms lo hacen
+ * ilegible en la práctica. Windows y macOS conservan los 90 ms originales:
+ * allí #164 ya mitiga la reapertura por foco y un delay largo se nota.
+ */
+const OPEN_DELAY = /Windows|Macintosh|Mac OS X/.test(navigator.userAgent) ? 90 : 350;
 const HIDE_DELAY = 900;
 /** Tras un aviso, la tira se muestra este tiempo aunque esté en auto-ocultar. */
 const REVEAL_MS = 6000;
@@ -666,7 +673,7 @@ export function Widget() {
     window.clearTimeout(openTimer.current);
   };
 
-  const openFor = (id: string, el: HTMLElement, immediate = false) => {
+  const openFor = (id: string, el: HTMLElement) => {
     if (phase !== 'open' || drag.current || orbDrag.current?.moved || Date.now() - lastReorderAt.current < 400) return;
     cancelTimers();
     const strip = stripRef.current?.getBoundingClientRect();
@@ -677,7 +684,7 @@ export function Widget() {
       setAnchorRel(rel);
       setHovered(id);
     };
-    if (hovered || immediate) go();
+    if (hovered) go();
     else openTimer.current = window.setTimeout(go, OPEN_DELAY);
   };
 
@@ -785,6 +792,11 @@ export function Widget() {
     cancelTimers();
     setHovered(null);
     setDragging(true);
+    // `widgetBounds.current` es la verdad incluso cuando el compositor no
+    // reporta posición: el caché lo escribe el propio `setWidgetBounds` que
+    // colocó la ventana, no una lectura de `outerPosition()`. Por eso sirve
+    // como origen síncrono del arrastre en xdg-shell, donde `outerPosition()`
+    // devuelve (0, 0) por diseño y no puede arrancar la aritmética por delta.
     const initialStart = widgetBounds.current
       ? new PhysicalPosition(widgetBounds.current.x, widgetBounds.current.y)
       : null;
@@ -794,6 +806,8 @@ export function Widget() {
     enqueueDrag(async () => {
       if (!current()) return;
       const position = await getCurrentWindow().outerPosition();
+      // Un (0, 0) real es una esquina legítima; solo se descarta cuando ya
+      // tenemos un origen creíble del caché.
       if (current() && (position.x !== 0 || position.y !== 0 || !d.start)) {
         d.start = position;
       }
@@ -997,14 +1011,6 @@ export function Widget() {
               threshold={config?.alerts.threshold}
               dragging={reorder?.id === r.id}
               onHover={(el) => openFor(r.id, el)}
-              onClick={(el) => {
-                if (hovered === r.id) {
-                  cancelTimers();
-                  setHovered(null);
-                } else {
-                  openFor(r.id, el, true);
-                }
-              }}
               pointer={orbHandlers(r.id)}
             />
           ))}
