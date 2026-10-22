@@ -82,6 +82,7 @@ pub struct AppConfig {
     pub anthropic_api: ApiCostConfig,
     pub openai_api: ApiCostConfig,
     pub nan: NanConfig,
+    pub minimax: MiniMaxConfig,
     pub nine_router: NineRouterConfig,
     /// Cuentas adicionales de un proveedor (la principal es la de arriba).
     pub accounts: Vec<Account>,
@@ -295,6 +296,7 @@ impl Default for AppConfig {
             anthropic_api: ApiCostConfig::default(),
             openai_api: ApiCostConfig::default(),
             nan: NanConfig::default(),
+    minimax: MiniMaxConfig::default(),
             nine_router: NineRouterConfig::default(),
             accounts: vec![],
         }
@@ -425,6 +427,21 @@ pub struct ApiCostConfig {
     pub monthly_budget_usd: Option<f64>,
 }
 
+/// MiniMax. `base_url` cubre las dos regiones: global `api.minimax.io` y
+/// China `api.minimaxi.com`. Cualquier otro host equivalente sirve igual.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct MiniMaxConfig {
+    pub enabled: bool,
+    pub base_url: String,
+}
+
+impl Default for MiniMaxConfig {
+    fn default() -> Self {
+        Self { enabled: false, base_url: "https://api.minimax.io".into() }
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(default, rename_all = "camelCase")]
 pub struct NanConfig {
@@ -523,6 +540,10 @@ impl AppConfig {
             self.nan.base_url = NanConfig::default().base_url;
         }
         self.nan.base_url = self.nan.base_url.trim().trim_end_matches('/').to_string();
+        if self.minimax.base_url.trim().is_empty() {
+            self.minimax.base_url = MiniMaxConfig::default().base_url;
+        }
+        self.minimax.base_url = self.minimax.base_url.trim().trim_end_matches('/').to_string();
         self.nan.billing_day = self.nan.billing_day.clamp(1, 28);
         if self.nine_router.base_url.trim().is_empty() {
             self.nine_router.base_url = NineRouterConfig::default().base_url;
