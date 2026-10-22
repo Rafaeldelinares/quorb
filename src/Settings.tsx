@@ -1959,7 +1959,7 @@ export function Settings() {
                 label="Subscription Key"
                 configured={!!secrets.minimax_subscription_key}
                 onSaved={loadSecrets}
-                hint={<>Del panel M/Token en <Link href={LINKS.minimaxKeys}>minimax.io</Link>. En la región de China, en <Link href={LINKS.minimaxKeysCn}>minimaxi.com</Link> (cambia también el host en Ajustes avanzados).</>}
+                hint={<>Del panel M/Token en <Link href={LINKS.minimaxKeys}>minimax.io</Link>. En la región de China, en <Link href={LINKS.minimaxKeysCn}>minimaxi.com</Link> (el host por región se cambia en Ajustes avanzados).</>}
               />
             </li>
             <li data-done={!!secrets.minimax_api_key || undefined}>
@@ -1974,6 +1974,20 @@ export function Settings() {
             </li>
             <HealthStep id="minimax" {...healthFor('minimax', !cfg.minimax.enabled)} />
           </ol>
+          <details className="q-details">
+            <summary>Avanzado · URL del API</summary>
+            <Field
+              label="Base URL"
+              hint="Las claves son por región: global en api.minimax.io, China en api.minimaxi.com. Si el anillo sale con error 1004 o 2049, prueba con la de tu región."
+            >
+              <input
+                type="text"
+                spellCheck={false}
+                value={cfg.minimax.baseUrl}
+                onChange={(e) => set('minimax', { baseUrl: e.target.value })}
+              />
+            </Field>
+          </details>
         </Section>
       )}
       {tab === 'openrouter' && (
