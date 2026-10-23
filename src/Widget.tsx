@@ -851,6 +851,12 @@ export function Widget() {
         if (!current()) return;
         const [wpos, mons] = await Promise.all([getCurrentWindow().outerPosition(), availableMonitors()]);
         if (!current()) return;
+        // `wpos` manda cuando el compositor informa algo: es la posición real.
+        // Si informa (0,0) con un origen en caché, se toma la rama por delta
+        // (caso de la esquina superior izquierda, reportado en #168). Como
+        // `start` sale del mismo caché que escribió `setWidgetBounds`, la
+        // desviación solo puede ser redondeo del compositor; si algún día se
+        // reporta el orbe imantado en esa esquina, revisar primero el redondeo.
         const posX = (wpos.x !== 0 || wpos.y !== 0)
           ? wpos.x
           : (d.start?.x ?? 0) + (e.screenX - d.sx) * d.sf;
