@@ -15,9 +15,10 @@ import { useUpdaterMode } from './lib/useUpdater';
 import { retryWithBackoff, STARTUP_RETRY, USAGE_RETRY } from './lib/startup';
 import { createSessionMonitor } from './lib/session-monitor';
 import { needsRefresh } from './lib/widget-refresh';
-import { createWidgetRecovery } from './lib/widget-recovery';
+import { createWidgetRecovery, shouldAuditNativePosition } from './lib/widget-recovery';
 import { createLatestQueue, physicalPanelBounds, samePhysical, DETAIL_EVENTS, DETAIL_WINDOW, isCurrentDetailInteraction, panelWidthFor, type DetailInteraction, type DetailState, type PhysicalBounds } from './lib/detail-panel';
-import { createDetailPresence, presenceFromPoint } from './lib/detail-presence';
+import { createDetailPresence, presenceFromPoint, shouldSampleNativePresence } from './lib/detail-presence';
+import { openDelayForOs, osFromUA } from './lib/os-detect';
 import { ProviderGauge } from './components/ProviderGauge';
 import { accountTags } from './lib/accounts';
 import { clipSurfaceSafely, measureSurfaceClip } from './lib/surface-clip';
@@ -26,13 +27,11 @@ import { useDockReveal } from './lib/useDockReveal';
 
 const CLOSE_DELAY = 280;
 /**
- * En Linux el barrido accidental del puntero no tiene red de contención: el
- * muestreo nativo de presencia (#154) solo existe en macOS, así que nada
- * más allá del temporizador filtra el paso sobre otro orbe. 350 ms lo hacen
- * ilegible en la práctica. Windows y macOS conservan los 90 ms originales:
- * allí #164 ya mitiga la reapertura por foco y un delay largo se nota.
+ * Platform-scoped, not global: Linux needs the long delay because nothing else
+ * contains an accidental sweep there, while Windows and macOS keep the original
+ * 90 ms. The rationale and the per-platform values live in `openDelayForOs()`.
  */
-const OPEN_DELAY = /Windows|Macintosh|Mac OS X/.test(navigator.userAgent) ? 90 : 350;
+const OPEN_DELAY = openDelayForOs(osFromUA(navigator.userAgent));
 const HIDE_DELAY = 900;
 /** Tras un aviso, la tira se muestra este tiempo aunque esté en auto-ocultar. */
 const REVEAL_MS = 6000;
@@ -523,7 +522,7 @@ export function Widget() {
     const win = getCurrentWindow();
     // Windows DWM recovery (#147/#148): on Wayland/Linux, outerPosition() returns (0,0)
     // and GTK window sizing differs, causing infinite false-positive recovery loops.
-    if (!/Windows/.test(navigator.userAgent)) return;
+    if (!shouldAuditNativePosition(osFromUA(navigator.userAgent))) return;
     const allowed = () => !disposed && !drag.current && !placementInFlight.current
       && (phase === 'open' || phase === 'hidden') && shown.current && widgetBounds.current !== null;
     const check = createWidgetRecovery({
@@ -720,7 +719,7 @@ export function Widget() {
   useEffect(() => {
     // Solo aplica en macOS (donde WebKit pierde eventos mouseleave en ventanas transparentes).
     // En Linux/Wayland, cursorPosition() devuelve (0,0) y causa falsos cierres del popup.
-    if (!/Macintosh|Mac OS X/.test(navigator.userAgent)) return;
+    if (!shouldSampleNativePresence(osFromUA(navigator.userAgent))) return;
     if (!hovered) {
       presenceRef.reset();
       return;
