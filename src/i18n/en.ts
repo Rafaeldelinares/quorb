@@ -247,6 +247,11 @@ export const en = {
     updateTo: 'Update to Quorb {version}',
     refreshNow: 'Update now',
     settings: 'Settings',
+    reasonSizeRefused: 'the window manager did not grant the size',
+    reasonPositionRefused: 'the window manager did not place the strip where it was asked',
+    reasonNotViewable: 'the native window is not visible yet',
+    reasonReadFailed: 'the native geometry could not be read',
+    reasonSuperseded: 'the placement was replaced by another one',
   },
   details: {
     range24h: '24 h',
