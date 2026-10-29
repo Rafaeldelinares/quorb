@@ -260,6 +260,11 @@ export const es = {
     updateTo: 'Actualizar a Quorb {version}',
     refreshNow: 'Actualizar ahora',
     settings: 'Ajustes',
+    reasonSizeRefused: 'el gestor no concedió el tamaño',
+    reasonPositionRefused: 'el gestor no colocó la tira donde se pidió',
+    reasonNotViewable: 'la ventana nativa todavía no es visible',
+    reasonReadFailed: 'no se pudo leer la geometría nativa',
+    reasonSuperseded: 'la colocación fue sustituida por otra',
   },
   details: {
     range24h: '24 h',
