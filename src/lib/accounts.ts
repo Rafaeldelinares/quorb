@@ -82,6 +82,7 @@ export const ACCOUNT_SECRETS: Record<AccountProvider, SecretKey[]> = {
   nan: ['nan_api_key', 'nan_session'],
   openrouter: ['openrouter_api_key'],
   zai: ['zai_api_key'],
+  opencode_go: ['opencode_go_api_key'],
   anthropic_api: ['anthropic_admin_key'],
   openai_api: ['openai_admin_key'],
   // Los sub-proveedores de 9Router comparten la sesión del dashboard (no scoped).
@@ -104,6 +105,8 @@ export function accountReady(a: Account, s: SecretStatus): boolean {
       return has('nan_session') || has('nan_api_key');
     case 'openrouter':
       return has('openrouter_api_key');
+    case 'opencode_go':
+      return has('opencode_go_api_key');
     case 'anthropic_api':
       return has('anthropic_admin_key');
     case 'openai_api':

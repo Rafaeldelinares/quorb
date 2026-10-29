@@ -52,6 +52,7 @@ const enabledOnly = (...ids: string[]) => {
     openaiApi: on('openai_api'),
     nineRouter: on('nine_router'),
     zai: on('zai'),
+    opencodeGo: on('opencode_go'),
     accounts: [{ id: 'claude:b', provider: 'claude', label: 'Cuenta 2', enabled: true }],
   } as unknown as AppConfig;
 };
@@ -77,6 +78,7 @@ const descriptions: [es: string, en: string][] = [
   ['Gasto del mes con clave de admin', 'Month spend with an admin key'],
   ['Pasarela local · uso y gasto agregados', 'Local gateway · aggregated usage and spend'],
   ['GLM Coding Plan · cuotas de 5 h, semanales y web tools', 'GLM Coding Plan · 5 h, weekly quotas and web tools'],
+  ['Go / Go Plus · cuotas de 5 h, semanal y ciclo de facturación', 'Go / Go Plus · 5 h, weekly and billing-cycle quotas'],
 ];
 
 describe('Providers list: tab descriptions and badges (SSR, i18n)', () => {
