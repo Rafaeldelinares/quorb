@@ -35,6 +35,7 @@ const widgetEffects = vi.hoisted(() => ({
   effects: [] as { run: () => void | (() => void); deps?: readonly unknown[] }[],
   bounds: vi.fn(), clip: vi.fn(), show: vi.fn(), innerSize: vi.fn(),
   outerPosition: vi.fn(), setPosition: vi.fn(), monitors: vi.fn(), patch: vi.fn(), stateWrite: vi.fn(),
+  cancel: vi.fn(async () => {}),
 }));
 vi.mock('react', async (importOriginal) => {
   const react = await importOriginal() as typeof import('react');
@@ -67,6 +68,7 @@ vi.mock('./api', () => ({ api: {
   setWidgetBounds: widgetEffects.bounds,
   setSurfaceClip: widgetEffects.clip,
   patchConfig: widgetEffects.patch,
+  cancelWidgetPlacement: widgetEffects.cancel,
 } }));
 vi.mock('@tauri-apps/api/window', () => ({
   getCurrentWindow: () => ({
@@ -294,6 +296,14 @@ describe('Widget effect mutation ordering', () => {
     widgetEffects.effects = [];
     vi.resetAllMocks();
     vi.unstubAllGlobals();
+  });
+
+  it('cancels the pending native placement when the strip starts to be dragged', () => {
+    configureNative();
+    const { placement } = renderWidget(true); // dragging
+    const cleanup = placement.run();
+    expect(widgetEffects.cancel).toHaveBeenCalledTimes(1);
+    if (typeof cleanup === 'function') cleanup();
   });
 
   it.each([true, false])('last accepted RAF drains before pointerup snap (delayBeforeDispatch=%s)', async (delayBeforeDispatch) => {
@@ -694,5 +704,62 @@ describe('Widget effect mutation ordering', () => {
       .toEqual([[400, 80], [400, 80]]);
     expect(widgetEffects.clip.mock.calls.map(call => call[1])).toEqual([true, !autoHide]);
     if (typeof cleanupDrag === 'function') cleanupDrag();
+  });
+});
+
+describe('the localized placement reason', () => {
+  const geo = {
+    area: { x: 0, y: 0, w: 1920, h: 1080 }, sf: 1, monitor: null,
+    screen: { x: 0, y: 0, width: 1920, height: 1080 },
+  };
+  // Hook slots of Widget (useDockReveal/useUpdaterMode are isolated above):
+  // 0 config, 5 geo, 6 stripSize, 16 placementFailed, 17 placementReason.
+  const markup = (locale: 'es' | 'en' = 'es', failed = true) => {
+    widgetEffects.stateIndex = 0;
+    widgetEffects.refIndex = 0;
+    widgetEffects.effects = [];
+    widgetEffects.states[0] = { autoHide: true, locale, accounts: [], nineRouter: { baseUrl: '' } };
+    widgetEffects.states[5] = geo;
+    widgetEffects.states[6] = { w: 400, h: 80 };
+    widgetEffects.states[16] = failed;
+    widgetEffects.states[17] = failed ? 'size_refused' : null;
+    return renderToStaticMarkup(createElement(Widget));
+  };
+
+  afterEach(() => {
+    widgetEffects.states = [];
+    widgetEffects.refs = [];
+    widgetEffects.effects = [];
+    vi.resetAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  it('carries the machine-readable code and shows the localized reason', () => {
+    const es = markup('es');
+    // El atributo lleva el código, no el texto: es machine-readable.
+    expect(es).toContain('data-placement-reason="size_refused"');
+    // El texto visible sale del catálogo, en el idioma de la ventana.
+    expect(es).toContain('title="el gestor no concedió el tamaño"');
+    expect(es).toContain('aria-label="Reintentar mostrar Quorb: el gestor no concedió el tamaño"');
+    // El código aparece una sola vez: en el atributo machine-readable, nunca
+    // en el texto visible.
+    expect(es.split('size_refused').length - 1).toBe(1);
+
+    const en = markup('en');
+    expect(en).toContain('data-placement-reason="size_refused"');
+    expect(en).toContain('title="the window manager did not grant the size"');
+    expect(en).toContain('aria-label="Retry showing Quorb: the window manager did not grant the size"');
+  });
+
+  it('keeps the upstream retry text when no placement failed', () => {
+    // Sin fallo de colocación el botón conserva el texto del catálogo de
+    // upstream (#195): ni motivo, ni título, ni atributo de motivo.
+    const es = markup('es', false);
+    expect(es).toContain('aria-label="Mostrar Quorb"');
+    expect(es).not.toContain('data-placement-reason');
+    expect(es).not.toContain('size_refused');
+    const en = markup('en', false);
+    expect(en).toContain('aria-label="Show Quorb"');
+    expect(en).not.toContain('data-placement-reason');
   });
 });

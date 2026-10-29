@@ -16,6 +16,7 @@ import { retryWithBackoff, STARTUP_RETRY, USAGE_RETRY } from './lib/startup';
 import { createSessionMonitor } from './lib/session-monitor';
 import { needsRefresh } from './lib/widget-refresh';
 import { createWidgetRecovery, shouldAuditNativePosition } from './lib/widget-recovery';
+import { placementOutcome, reasonKey, samePhysicalWithin, type WidgetPlacementReason } from './lib/widget-placement';
 import { createLatestQueue, physicalPanelBounds, samePhysical, DETAIL_EVENTS, DETAIL_WINDOW, isCurrentDetailInteraction, panelWidthFor, type DetailInteraction, type DetailState, type PhysicalBounds } from './lib/detail-panel';
 import { createDetailPresence, presenceFromPoint, shouldSampleNativePresence } from './lib/detail-presence';
 import { openDelayForOs, osFromUA } from './lib/os-detect';
@@ -164,6 +165,11 @@ export function Widget() {
   const [peekFocused, setPeekFocused] = useState(false);
   const [placementRetry, setPlacementRetry] = useState(0);
   const [placementFailed, setPlacementFailed] = useState(false);
+  /** Motivo del backend cuando el gestor no concedió la geometría (#179). */
+  const [placementReason, setPlacementReason] = useState<WidgetPlacementReason | null>(null);
+  /** El motivo localizado: el código del backend se traduce con el catálogo (#179). */
+  const placementReasonKey = reasonKey(placementReason);
+  const placementReasonText = placementReasonKey ? t(locale, placementReasonKey) : null;
   const [revealUntil, setRevealUntil] = useState(0);
 
   // reordenar círculos
@@ -479,21 +485,44 @@ export function Widget() {
   // Expand before entering; shrink only after the exit transition. Hovering between
   // providers never changes this window, and each native rectangle is applied atomically.
   useEffect(() => {
-    if (dragging) { widgetBounds.current = null; return; }
+    if (dragging) {
+      // El arrastre manda: cancela la estabilización pendiente (#179).
+      try {
+        api.cancelWidgetPlacement().catch(() => {});
+      } catch {
+        /* un backend sin este comando no impide arrastrar */
+      }
+      widgetBounds.current = null;
+      return;
+    }
     if (!geo || !stripSize) return;
     let disposed = false;
     const s = stripRect(geo.area, edge, offset, stripSize.w, stripSize.h);
     const win = usesPeekWindow(phase) ? peekRect(s, edge) : s;
-    const physical = physicalPanelBounds(win, geo.sf);
+    // La petición lleva el borde anclado y el factor con el que se calculó el
+    // rectángulo: con otro tamaño efectivo, el borde se conserva y la
+    // conversión no depende del factor de la ventana (DPI mixto) (#179).
+    const physical = { ...physicalPanelBounds(win, geo.sf), anchor: edge, scale: geo.sf };
     setPos({ strip: { x: s.x - win.x, y: s.y - win.y } });
     placementInFlight.current = true;
     widgetQueue(async (current) => {
       if (disposed || !current()) return;
-      if (!samePhysical(widgetBounds.current, physical)) {
+      let limited = false;
+      let reason: WidgetPlacementReason | null = null;
+      // La comparación usa la misma tolerancia que el backend: el gestor
+      // redondea a píxeles de dispositivo y un redondeo no es un cambio.
+      if (!samePhysicalWithin(widgetBounds.current, physical)) {
         widgetBounds.current = null; // Never reuse a cache invalidated by a stale in-flight move.
-        await api.setWidgetBounds(physical);
+        // El backend es la autoridad: responde con la geometría que quedó en
+        // pantalla, no con la solicitud encolada (#179).
+        const report = await api.setWidgetBounds(physical);
         if (disposed || !current()) return;
-        widgetBounds.current = physical;
+        const outcome = placementOutcome(report, physical);
+        // Sólo se cachea geometría fiable: una colocación cancelada (quedó a
+        // medias) o una lectura fallida dejan la caché vacía.
+        if (outcome.bounds) widgetBounds.current = outcome.bounds;
+        limited = outcome.failed;
+        reason = outcome.reason;
       }
       const surface = usesPeekWindow(phase) ? peekRef.current : stripRef.current;
       if (!surface) throw new Error('Widget surface is not mounted');
@@ -510,6 +539,10 @@ export function Widget() {
       if (phase === 'preparing' || phase === 'settling') await waitForViewport();
       if (disposed || !current()) return;
       setPlacementFailed(false);
+      // El gestor no concedió la geometría: se informa (con su motivo) y la
+      // tira ofrece reintento.
+      if (limited) setPlacementFailed(true);
+      setPlacementReason(limited ? reason : null);
       if (phase === 'preparing' || phase === 'settling') markPrepared(phase);
     }).catch((error) => {
       if (disposed) return;
@@ -952,6 +985,7 @@ export function Widget() {
       data-auto-hide={showHandle || undefined}
       data-reveal={phase}
       data-placement-failed={placementFailed || undefined}
+      data-placement-reason={placementReason ?? undefined}
       onFocusCapture={() => { setFocused(true); setCollapsed(false); }}
       onBlurCapture={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setFocused(false); }}
       style={{ '--panel-alpha': String(opacity), '--ring-1': ring1, '--ring-2': ring2, '--ring-3': ring3 } as CSSProperties}
@@ -970,7 +1004,8 @@ export function Widget() {
         ref={peekRef}
         type="button"
         className="peek"
-        aria-label={placementFailed ? t(locale, 'widget.retryShow') : t(locale, 'widget.show')}
+        aria-label={placementFailed ? `${t(locale, 'widget.retryShow')}${placementReasonText ? `: ${placementReasonText}` : ''}` : t(locale, 'widget.show')}
+        title={placementFailed ? placementReasonText ?? undefined : undefined}
         aria-controls="quorb-strip"
         aria-hidden={phase === 'open' && !peekFocused || undefined}
         tabIndex={phase === 'hidden' || placementFailed && (usesPeekWindow(phase) || phase === 'preparing') ? 0 : -1}
