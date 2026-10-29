@@ -208,6 +208,7 @@ export const es = {
         openaiApi: 'Gasto del mes con clave de admin',
         nineRouter: 'Pasarela local · uso y gasto agregados',
         zai: 'GLM Coding Plan · cuotas de 5 h, semanales y web tools',
+        opencodeGo: 'Go / Go Plus · cuotas de 5 h, semanal y ciclo de facturación',
       },
       badge: {
         on: 'Activo',

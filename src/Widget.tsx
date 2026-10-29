@@ -16,7 +16,7 @@ import { retryWithBackoff, STARTUP_RETRY, USAGE_RETRY } from './lib/startup';
 import { createSessionMonitor } from './lib/session-monitor';
 import { needsRefresh } from './lib/widget-refresh';
 import { createWidgetRecovery, shouldAuditNativePosition } from './lib/widget-recovery';
-import { placementOutcome, reasonKey, samePhysicalWithin, type WidgetPlacementReason } from './lib/widget-placement';
+import { placementOutcome, reasonKey, samePlacement, type WidgetPlacementReason, type WidgetPlacementReport } from './lib/widget-placement';
 import { createLatestQueue, physicalPanelBounds, samePhysical, DETAIL_EVENTS, DETAIL_WINDOW, isCurrentDetailInteraction, panelWidthFor, type DetailInteraction, type DetailState, type PhysicalBounds } from './lib/detail-panel';
 import { createDetailPresence, presenceFromPoint, shouldSampleNativePresence } from './lib/detail-presence';
 import { openDelayForOs, osFromUA } from './lib/os-detect';
@@ -181,6 +181,8 @@ export function Widget() {
   const peekRef = useRef<HTMLButtonElement>(null);
   const widgetQueue = useRef(createLatestQueue()).current;
   const widgetBounds = useRef<PhysicalBounds | null>(null);
+  /** True si la geometría cacheada vino del read-back del compositor (X11). */
+  const widgetBoundsReadBack = useRef(false);
   const placementInFlight = useRef(false);
   const orbsRef = useRef<HTMLDivElement>(null);
   const detailStateRef = useRef<DetailState | null>(null);
@@ -214,6 +216,8 @@ export function Widget() {
     }),
   ).current;
   const shown = useRef(false);
+  /** El usuario ocultó la tira desde la bandeja: la visibilidad es suya (#179). */
+  const hiddenByUser = useRef(false);
   const drag = useRef<{ sx: number; sy: number; start: PhysicalPosition | null; sf: number; raf: number; pointerId: number; ending: boolean } | null>(null);
   const orbDrag = useRef<{ id: string; x: number; y: number; moved: boolean } | null>(null);
   const lastReorderAt = useRef(0);
@@ -337,6 +341,17 @@ export function Widget() {
       }),
       listen('refresh-now', () => refresh()),
       listen('open-peak', () => openPeakRef.current()),
+      // La visibilidad de la tira es del usuario (#179): cuando la oculta
+      // desde la bandeja no se vuelve a mostrar por nuestra cuenta, y cuando
+      // la vuelve a mostrar hay que pedir la colocación de nuevo (la anterior
+      // pudo quedarse sin leer mientras estaba oculta).
+      listen('widget-hidden', () => {
+        hiddenByUser.current = true;
+      }),
+      listen('widget-shown', () => {
+        hiddenByUser.current = false;
+        setPlacementRetry((n) => n + 1);
+      }),
     ];
     return () => {
       controller.abort();
@@ -509,20 +524,29 @@ export function Widget() {
       if (disposed || !current()) return;
       let limited = false;
       let reason: WidgetPlacementReason | null = null;
-      // La comparación usa la misma tolerancia que el backend: el gestor
-      // redondea a píxeles de dispositivo y un redondeo no es un cambio.
-      if (!samePhysicalWithin(widgetBounds.current, physical)) {
-        widgetBounds.current = null; // Never reuse a cache invalidated by a stale in-flight move.
-        // El backend es la autoridad: responde con la geometría que quedó en
-        // pantalla, no con la solicitud encolada (#179).
-        const report = await api.setWidgetBounds(physical);
-        if (disposed || !current()) return;
+      // La comparación con la geometría cacheada usa la tolerancia del
+      // backend **sólo** si esa geometría vino del read-back de X11: en el
+      // resto de plataformas un cambio de 1 px sí es un cambio (#179).
+      const same = samePlacement(widgetBounds.current, physical, widgetBoundsReadBack.current);
+      // El backend es la autoridad: responde con la geometría que quedó en
+      // pantalla, no con la solicitud encolada (#179).
+      const apply = (report: WidgetPlacementReport) => {
         const outcome = placementOutcome(report, physical);
         // Sólo se cachea geometría fiable: una colocación cancelada (quedó a
         // medias) o una lectura fallida dejan la caché vacía.
-        if (outcome.bounds) widgetBounds.current = outcome.bounds;
+        if (outcome.bounds) {
+          widgetBounds.current = outcome.bounds;
+          widgetBoundsReadBack.current = outcome.readBack;
+        }
         limited = outcome.failed;
         reason = outcome.reason;
+      };
+      if (!same) {
+        widgetBounds.current = null; // Never reuse a cache invalidated by a stale in-flight move.
+        widgetBoundsReadBack.current = false;
+        const report = await api.setWidgetBounds(physical);
+        if (disposed || !current()) return;
+        apply(report);
       }
       const surface = usesPeekWindow(phase) ? peekRef.current : stripRef.current;
       if (!surface) throw new Error('Widget surface is not mounted');
@@ -531,10 +555,18 @@ export function Widget() {
       // blur rectangle and no blur-radius change at the start/end of the animation.
       await clipSurfaceSafely(clip, (c) => api.setSurfaceClip(c, !autoHide && phase === 'open'), console.warn, surface);
       if (disposed || !current()) return;
-      if (!shown.current) {
+      if (!shown.current && !hiddenByUser.current) {
+        // La visibilidad es del frontend: el backend nunca muestra la ventana.
         await getCurrentWindow().show();
         if (disposed || !current()) return;
         shown.current = true;
+      }
+      // El backend no puede leer una ventana que todavía no es visible: se
+      // vuelve a pedir la colocación para confirmar la geometría (#179).
+      if (!same && reason === 'not_viewable' && !hiddenByUser.current) {
+        const report = await api.setWidgetBounds(physical);
+        if (disposed || !current()) return;
+        apply(report);
       }
       if (phase === 'preparing' || phase === 'settling') await waitForViewport();
       if (disposed || !current()) return;
@@ -807,7 +839,10 @@ export function Widget() {
   // Red de seguridad: si algo falla al medir/colocar, mostramos igualmente la ventana.
   useEffect(() => {
     const t = window.setTimeout(() => {
-      if (!shown.current) {
+      // La visibilidad es del usuario (#179): una tira oculta desde la bandeja
+      // no se vuelve a mostrar por nuestra cuenta, ni siquiera por la red de
+      // seguridad.
+      if (!shown.current && !hiddenByUser.current) {
         shown.current = true;
         getCurrentWindow().show().catch(() => {});
       }

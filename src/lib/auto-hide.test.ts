@@ -36,6 +36,7 @@ const widgetEffects = vi.hoisted(() => ({
   bounds: vi.fn(), clip: vi.fn(), show: vi.fn(), innerSize: vi.fn(),
   outerPosition: vi.fn(), setPosition: vi.fn(), monitors: vi.fn(), patch: vi.fn(), stateWrite: vi.fn(),
   cancel: vi.fn(async () => {}),
+  listeners: new Map<string, (() => void)[]>(),
 }));
 vi.mock('react', async (importOriginal) => {
   const react = await importOriginal() as typeof import('react');
@@ -76,6 +77,15 @@ vi.mock('@tauri-apps/api/window', () => ({
     outerPosition: widgetEffects.outerPosition, setPosition: widgetEffects.setPosition,
   }),
   availableMonitors: widgetEffects.monitors,
+}));
+vi.mock('@tauri-apps/api/event', () => ({
+  listen: vi.fn(async (name: string, handler: () => void) => {
+    const list = widgetEffects.listeners.get(name) ?? [];
+    list.push(handler);
+    widgetEffects.listeners.set(name, list);
+    return () => {};
+  }),
+  emitTo: vi.fn(),
 }));
 
 describe('auto-hide geometry and phases', () => {
@@ -296,6 +306,7 @@ describe('Widget effect mutation ordering', () => {
     widgetEffects.effects = [];
     vi.resetAllMocks();
     vi.unstubAllGlobals();
+    vi.useRealTimers();
   });
 
   it('cancels the pending native placement when the strip starts to be dragged', () => {
@@ -303,6 +314,73 @@ describe('Widget effect mutation ordering', () => {
     const { placement } = renderWidget(true); // dragging
     const cleanup = placement.run();
     expect(widgetEffects.cancel).toHaveBeenCalledTimes(1);
+    if (typeof cleanup === 'function') cleanup();
+  });
+
+  it('asks again for the placement when the backend could not read the window', async () => {
+    configureNative();
+    // El backend no pudo leer una ventana que todavía no era visible: tras
+    // mostrarla, la colocación se pide de nuevo para confirmar la geometría.
+    widgetEffects.bounds.mockResolvedValue({ status: 'unverified', bounds: null, reason: 'not_viewable' });
+    const cleanup = renderWidget(false).placement.run();
+    await flush();
+    expect(widgetEffects.bounds).toHaveBeenCalledTimes(2);
+    expect(widgetEffects.show).toHaveBeenCalledTimes(1);
+    if (typeof cleanup === 'function') cleanup();
+  });
+
+  it('never shows a strip the user hid from the tray, nor re-asks its placement', async () => {
+    configureNative();
+    const { placement } = renderWidget(false);
+    // El usuario oculta la tira desde la bandeja: la visibilidad es suya.
+    const listener = widgetEffects.effects.find((e) => e.run.toString().includes('widget-hidden'));
+    expect(listener).toBeDefined();
+    const cleanupListener = listener!.run();
+    await flush();
+    for (const handler of widgetEffects.listeners.get('widget-hidden') ?? []) handler();
+    widgetEffects.bounds.mockResolvedValue({ status: 'unverified', bounds: null, reason: 'not_viewable' });
+    const cleanup = placement.run();
+    await flush();
+    expect(widgetEffects.show).not.toHaveBeenCalled();
+    expect(widgetEffects.bounds).toHaveBeenCalledTimes(1);
+    if (typeof cleanup === 'function') cleanup();
+    if (typeof cleanupListener === 'function') cleanupListener();
+  });
+
+  it('never shows a strip the user hid from the tray, not even through the safety net', async () => {
+    configureNative();
+    vi.useFakeTimers();
+    vi.stubGlobal('window', {
+      setTimeout: globalThis.setTimeout, clearTimeout: globalThis.clearTimeout,
+    });
+    renderWidget(false);
+    // El usuario oculta la tira desde la bandeja: la visibilidad es suya.
+    const listener = widgetEffects.effects.find((e) => e.run.toString().includes('widget-hidden'));
+    const cleanupListener = listener!.run();
+    await flush();
+    for (const handler of widgetEffects.listeners.get('widget-hidden') ?? []) handler();
+    // La red de seguridad (2,5 s) muestra la ventana si el ciclo no llegó a
+    // mostrarla: tampoco puede contradecir al usuario.
+    const safetyNet = widgetEffects.effects.find((e) => e.deps?.length === 0 && e.run.toString().includes('setTimeout'));
+    expect(safetyNet).toBeDefined();
+    const cleanup = safetyNet!.run();
+    await vi.advanceTimersByTimeAsync(2500);
+    expect(widgetEffects.show).not.toHaveBeenCalled();
+    if (typeof cleanup === 'function') cleanup();
+    if (typeof cleanupListener === 'function') cleanupListener();
+  });
+
+  it('shows the strip through the safety net when the user did not hide it', async () => {
+    configureNative();
+    vi.useFakeTimers();
+    vi.stubGlobal('window', {
+      setTimeout: globalThis.setTimeout, clearTimeout: globalThis.clearTimeout,
+    });
+    renderWidget(false);
+    const safetyNet = widgetEffects.effects.find((e) => e.deps?.length === 0 && e.run.toString().includes('setTimeout'));
+    const cleanup = safetyNet!.run();
+    await vi.advanceTimersByTimeAsync(2500);
+    expect(widgetEffects.show).toHaveBeenCalledTimes(1);
     if (typeof cleanup === 'function') cleanup();
   });
 

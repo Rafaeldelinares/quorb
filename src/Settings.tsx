@@ -40,6 +40,7 @@ const LINKS = {
   minimaxKeys: 'https://www.minimax.io/',
   minimaxKeysCn: 'https://www.minimaxi.com/',
   zaiKeys: 'https://z.ai/manage-apikey/apikey-list',
+  opencodeConsole: 'https://opencode.ai/console',
   geminiCli: 'https://github.com/google-gemini/gemini-cli',
   grokCli: 'https://x.ai/',
   releases: 'https://github.com/egdev6/quorb/releases',
@@ -1047,6 +1048,23 @@ function AccountEditor({
           </>
         )}
 
+        {a.provider === 'opencode_go' && (
+          <>
+            <li data-done={has('opencode_go_api_key') || undefined}>
+              <b>API key</b>
+              <SecretInput
+                locale={health.locale}
+                id={key('opencode_go_api_key')}
+                label="API key de OpenCode Go"
+                configured={has('opencode_go_api_key')}
+                onSaved={onSecrets}
+                hint={<>Créala en <Link href={LINKS.opencodeConsole}>OpenCode › Console</Link>.</>}
+              />
+            </li>
+            {check}
+          </>
+        )}
+
         {(a.provider === 'anthropic_api' || a.provider === 'openai_api') && (
           <>
             <li data-done={has(adminKey) || undefined}>
@@ -1110,6 +1128,7 @@ const PROVIDER_TABS = [
   { id: 'openai_api', name: 'OpenAI API', group: 'api', descKey: 'settings.providers.desc.openaiApi' },
   { id: 'nine_router', name: '9Router', group: 'api', descKey: 'settings.providers.desc.nineRouter' },
   { id: 'zai', name: 'z.ai', group: 'sub', descKey: 'settings.providers.desc.zai' },
+  { id: 'opencode_go', name: 'OpenCode Go', group: 'sub', descKey: 'settings.providers.desc.opencodeGo' },
 ] as const satisfies readonly { id: string; name: string; nameKey?: MessageKey; group: 'sub' | 'api'; descKey: MessageKey }[];
 /** Nombre visible de un proveedor en el idioma activo. */
 const providerName = (p: { name: string; nameKey?: MessageKey }, locale: Locale) => (p.nameKey ? t(locale, p.nameKey) : p.name);
@@ -1656,6 +1675,8 @@ function mainState(id: ProviderTab, cfg: AppConfig, s: SecretStatus): ProviderSt
       return on(cfg.nineRouter.enabled, !!s.nine_router_password);
     case 'zai':
       return on(cfg.zai.enabled, !!s.zai_api_key);
+    case 'opencode_go':
+      return on(cfg.opencodeGo.enabled, !!s.opencode_go_api_key);
   }
 }
 
@@ -2469,6 +2490,27 @@ export function Settings() {
               />
             </li>
             <HealthStep id="zai" {...healthFor('zai', !cfg.zai.enabled)} />
+          </ol>
+        </Section>
+      )}
+
+      {tab === 'opencode_go' && (
+        <Section kicker="Suscripción · Go / Go Plus" title="OpenCode Go">
+          <Toggle label="Mostrar en el widget" checked={isAccountVisible(cfg, 'opencode_go', cfg.opencodeGo.enabled)} onChange={(v) => setVisibility('opencode_go', v)} />
+          <p className="q-note">Cuota de las últimas 5 h, cuota semanal y cuota del ciclo de facturación de la suscripción Go / Go Plus.</p>
+          <ol className="q-steps" aria-label="Cómo conectar la cuenta">
+            <li data-done={!!secrets.opencode_go_api_key || undefined}>
+              <b>API key</b>
+              <SecretInput
+                locale={locale}
+                id="opencode_go_api_key"
+                label="API key de OpenCode Go"
+                configured={!!secrets.opencode_go_api_key}
+                onSaved={loadSecrets}
+                hint={<>Créala en <Link href={LINKS.opencodeConsole}>OpenCode › Console</Link>.</>}
+              />
+            </li>
+            <HealthStep id="opencode_go" {...healthFor('opencode_go', !cfg.opencodeGo.enabled)} />
           </ol>
         </Section>
       )}

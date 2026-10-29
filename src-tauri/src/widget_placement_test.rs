@@ -1,17 +1,18 @@
 //! Contrato determinista del ciclo de colocación nativa (#179).
 //!
-//! El doble de `Surface` modela al gestor de ventanas: responde al pedido de
-//! tamaño con retraso, puede recortarlo al mínimo anterior y sólo responde
-//! cuando la ventana está mapeada (antes, su geometría no es prueba del
-//! compositor). Las aserciones miran el resultado del ciclo, no sólo el orden
-//! de las llamadas.
+//! El doble de `Surface` modela al gestor de ventanas: **la visibilidad la
+//! decide el frontend** (el backend nunca mapea la ventana), el compositor
+//! responde tarde, el permiso de resize se abre **sólo** alrededor del resize
+//! programático y ninguna llamada nativa se da por buena sin confirmar. Las
+//! aserciones miran el resultado del ciclo, no sólo el orden de las llamadas.
 
 use super::widget_placement::*;
 use crate::detail_geometry::Bounds;
 
-/// Gestor de ventanas simulado: responde tarde, y sólo con la ventana mapeada.
+/// Gestor de ventanas simulado: la visibilidad es del frontend, el compositor
+/// responde tarde y el permiso de resize sólo vive durante el resize.
 struct Fake {
-    /// (origen, tamaño) que concede el gestor una vez mapeada la ventana.
+    /// (origen, tamaño) que concede el gestor una vez colocada la ventana.
     granted: Geometry,
     /// (origen, tamaño) que la ventana conserva mientras el gestor calla.
     pending: Geometry,
@@ -22,10 +23,25 @@ struct Fake {
     /// Lecturas hechas y estabilizaciones esperadas.
     reads: usize,
     settles: usize,
-    /// Si la ventana ya está mapeada.
-    mapped: bool,
+    /// Si la ventana es visible: lo decide el frontend, no el backend.
+    viewable: bool,
     /// Si la lectura falla (no hay respuesta de la superficie nativa).
     fail_read: bool,
+    /// Llamadas nativas que no se pueden confirmar (las primeras N).
+    fail_calls: usize,
+    /// Llamadas de posición que no se pueden confirmar (las primeras N).
+    fail_position_calls: usize,
+    /// El tamaño en efecto **después** de un número de lecturas: el
+    /// compositor puede cambiar el tamaño más tarde (su respuesta llega
+    /// asíncrona), y el informe tiene que reflejar lo que quedó en pantalla.
+    size_after_reads: Option<(usize, (i32, i32))>,
+    /// Las pistas que ya fijó la colocación sucesora (la que cancela a
+    /// esta): se aplican en la primera lectura, como en la carrera real (la
+    /// sucesora escribe sus pistas antes de que la cancelada suelte el
+    /// tamaño).
+    successor_constraints: Option<(i32, i32)>,
+    /// Si el permiso de resize está activo.
+    resizable: bool,
     /// Llamadas nativas, en orden.
     calls: Vec<String>,
 }
@@ -46,8 +62,13 @@ impl Fake {
             hidden: 0,
             reads: 0,
             settles: 0,
-            mapped: false,
+            viewable: true,
             fail_read: false,
+            fail_calls: 0,
+            fail_position_calls: 0,
+            size_after_reads: None,
+            successor_constraints: None,
+            resizable: false,
             calls: Vec::new(),
         }
     }
@@ -59,20 +80,62 @@ impl Fake {
             ..Fake::granting()
         }
     }
+
+    /// La ventana que el frontend todavía no ha mostrado.
+    fn hidden_window() -> Self {
+        Fake {
+            viewable: false,
+            ..Fake::granting()
+        }
+    }
+
+    /// El índice de la llamada "permission open" y el de "permission closed".
+    fn permission_window(&self) -> (usize, usize) {
+        let open = self
+            .calls
+            .iter()
+            .position(|c| c == "permission open")
+            .expect("el permiso se abre para el resize");
+        let closed = self
+            .calls
+            .iter()
+            .position(|c| c == "permission closed")
+            .expect("el permiso se retira");
+        (open, closed)
+    }
 }
 
 impl Surface for Fake {
-    async fn request_size(&mut self, width: i32, height: i32) {
+    async fn request_size(&mut self, width: i32, height: i32) -> bool {
+        if self.fail_calls > 0 {
+            self.fail_calls -= 1;
+            self.calls
+                .push(format!("size {width}x{height} (sin confirmar)"));
+            return false;
+        }
         self.calls.push(format!("size {width}x{height}"));
+        // El permiso de resize se abre **sólo** para el resize programático y
+        // se retira en la misma llamada: fuera de ella no hay cursor de
+        // redimensionar ni arrastre de borde.
+        self.calls.push("permission open".into());
+        self.calls.push("permission closed".into());
+        self.resizable = false;
+        true
     }
 
-    async fn request_position(&mut self, x: i32, y: i32) {
+    async fn request_position(&mut self, x: i32, y: i32) -> bool {
+        if self.fail_position_calls > 0 {
+            self.fail_position_calls -= 1;
+            self.calls.push(format!("position {x},{y} (sin confirmar)"));
+            return false;
+        }
         self.calls.push(format!("position {x},{y}"));
+        true
     }
 
-    async fn map(&mut self) {
-        self.calls.push("map".into());
-        self.mapped = true;
+    async fn set_size_constraints(&mut self, width: i32, height: i32) -> bool {
+        self.calls.push(format!("constraints {width}x{height}"));
+        true
     }
 
     async fn read_geometry(&mut self) -> Result<Option<Geometry>, String> {
@@ -84,15 +147,30 @@ impl Surface for Fake {
         if self.reads <= self.hidden {
             return Ok(None);
         }
-        // Sin mapear no hay prueba del compositor: la geometría no se lee.
-        if !self.mapped {
+        // Sin visibilidad no hay prueba del compositor: la geometría no se lee.
+        if !self.viewable {
             return Ok(None);
         }
-        Ok(Some(if self.reads > self.delay {
+        // La colocación sucesora ya fijó sus pistas: la cancelada no puede
+        // pisarlas con una lectura vieja.
+        if let Some((w, h)) = self.successor_constraints.take() {
+            self.calls.push(format!("constraints {w}x{h}"));
+        }
+        let geometry = if self.reads > self.delay {
             self.granted
         } else {
             self.pending
-        }))
+        };
+        // El compositor puede cambiar el tamaño más tarde (su respuesta llega
+        // asíncrona): el informe tiene que reflejar lo que quedó en pantalla.
+        let geometry = match self.size_after_reads {
+            Some((after, size)) if self.reads >= after => Geometry {
+                origin: geometry.origin,
+                size,
+            },
+            _ => geometry,
+        };
+        Ok(Some(geometry))
     }
 
     async fn settle(&mut self) {
@@ -138,12 +216,106 @@ fn the_cycle_reports_the_geometry_the_window_manager_granted() {
         })
     );
     assert!(report.reason.is_none());
-    // La ventana se mapea antes de leer: el read-back es prueba del compositor.
-    assert!(fake.calls.iter().any(|c| c == "map"), "la ventana se mapea");
+    // La geometría viene del compositor: el frontend sabe que admite la
+    // tolerancia del redondeo.
+    assert!(report.read_back, "la geometría es del read-back");
 }
 
 #[test]
-fn a_window_that_is_not_visible_yet_is_retried_and_not_a_failure() {
+fn the_resize_permission_is_open_only_while_the_programmatic_resize_runs() {
+    let mut fake = Fake::granting();
+    let report = run(&mut fake, &placement(Anchor::Right), false);
+    assert_eq!(report.status, Status::Applied);
+    // El permiso se abre y se retira dentro de la misma llamada nativa: entre
+    // las dos no cabe ninguna otra llamada (ni una lectura, ni un movimiento).
+    let (open, closed) = fake.permission_window();
+    assert_eq!(
+        closed,
+        open + 1,
+        "el permiso dura lo que el resize: {:?}",
+        fake.calls
+    );
+    // Y al final del ciclo no queda permiso abierto.
+    assert!(!fake.resizable, "el permiso de resize se retira");
+    // El permiso se abre una sola vez por ciclo.
+    assert_eq!(
+        fake.calls
+            .iter()
+            .filter(|c| *c == "permission open")
+            .count(),
+        1,
+        "un solo resize con permiso: {:?}",
+        fake.calls
+    );
+}
+
+#[test]
+fn the_final_read_back_verifies_the_size_after_the_withdrawal() {
+    let mut fake = Fake::granting();
+    fake.delay = 0;
+    // El compositor cambia el tamaño **después** de la lectura intermedia (su
+    // respuesta es asíncrona): el informe tiene que decir el tamaño que quedó
+    // en pantalla, no el de antes.
+    fake.size_after_reads = Some((2, (320, 260)));
+    let report = run(&mut fake, &placement(Anchor::Right), false);
+    // Si el tamaño ya no es el concedido, la colocación es una limitación, no
+    // `applied`.
+    assert_eq!(report.status, Status::Limited);
+    assert_eq!(report.reason, Some(Reason::SizeRefused));
+    assert_eq!(
+        report.bounds,
+        Some(Bounds {
+            x: 1859,
+            y: 899,
+            w: 320,
+            h: 260
+        }),
+        "el tamaño del informe es el que quedó en pantalla"
+    );
+}
+
+#[test]
+fn a_native_call_that_cannot_be_confirmed_is_not_a_success() {
+    let mut fake = Fake::granting();
+    // La llamada nativa no responde (ni al reintento): el ciclo no puede
+    // seguir como si el tamaño se hubiera aplicado.
+    fake.fail_calls = 2;
+    let report = run(&mut fake, &placement(Anchor::Right), false);
+    assert_ne!(report.status, Status::Applied);
+    assert_eq!(report.status, Status::Unverified);
+    assert_eq!(report.reason, Some(Reason::ReadFailed));
+    assert_eq!(report.bounds, None);
+}
+
+#[test]
+fn a_native_call_is_retried_within_a_bounded_budget() {
+    let mut fake = Fake::granting();
+    // La primera llamada no se confirma: el ciclo la reintenta (una sola vez)
+    // y si va bien, la colocación sigue.
+    fake.fail_calls = 1;
+    let report = run(&mut fake, &placement(Anchor::Right), false);
+    assert_eq!(report.status, Status::Applied);
+    let sizes = fake.calls.iter().filter(|c| c.starts_with("size ")).count();
+    assert_eq!(sizes, 2, "un reintento y nada más: {:?}", fake.calls);
+}
+
+#[test]
+fn the_backend_never_shows_the_window() {
+    let mut fake = Fake::granting();
+    run(&mut fake, &placement(Anchor::Right), false);
+    // La visibilidad es del frontend: el backend no mapea ni muestra nada.
+    assert!(
+        !fake
+            .calls
+            .iter()
+            .any(|c| c.contains("map") || c.contains("show")),
+        "el backend no muestra la ventana: {:?}",
+        fake.calls
+    );
+}
+
+#[test]
+fn a_window_that_is_not_viewable_yet_is_retried_and_not_a_failure() {
     let mut fake = Fake::granting();
     // Las dos primeras lecturas no ven la ventana: no es un error, es "todavía
     // no" y el ciclo tiene que sobrevivir dentro de su presupuesto.
@@ -162,12 +334,31 @@ fn a_window_that_is_not_visible_yet_is_retried_and_not_a_failure() {
 
     // Si la ventana no llega a verse dentro del presupuesto, tampoco es un
     // fallo de lectura: se informa como tal y no se cachea geometría.
-    let mut hidden = Fake::granting();
+    let mut hidden = Fake::hidden_window();
     hidden.hidden = usize::MAX;
     let report = run(&mut hidden, &placement(Anchor::Right), false);
     assert_eq!(report.status, Status::Unverified);
     assert_eq!(report.reason, Some(Reason::NotViewable));
     assert_eq!(report.bounds, None);
+}
+
+#[test]
+fn a_visible_window_whose_size_never_matches_is_a_size_problem_not_a_visibility_one() {
+    // La ventana se ve pero el gestor no concede el tamaño: el motivo es el
+    // tamaño, no «la ventana todavía no es visible».
+    let mut fake = Fake::refusing();
+    let report = run(&mut fake, &placement(Anchor::Right), false);
+    assert_eq!(report.status, Status::Limited);
+    assert_eq!(report.reason, Some(Reason::SizeRefused));
+    assert_eq!(
+        report.bounds,
+        Some(Bounds {
+            x: 800,
+            y: 425,
+            w: 320,
+            h: 260
+        })
+    );
 }
 
 #[test]
@@ -192,8 +383,8 @@ fn a_size_the_window_manager_clamps_is_a_limitation_and_not_the_request() {
 fn the_cycle_stops_reading_after_its_budget() {
     let mut fake = Fake::refusing();
     let report = run(&mut fake, &placement(Anchor::Right), false);
-    assert!(fake.reads <= 4 * READS, "reads: {}", fake.reads);
-    assert!(fake.settles <= 4 * READS, "sin recuperación permanente");
+    assert!(fake.reads <= 6 * READS, "reads: {}", fake.reads);
+    assert!(fake.settles <= 6 * READS, "sin recuperación permanente");
     assert_eq!(report.status, Status::Limited);
 }
 
@@ -224,19 +415,19 @@ fn an_already_sized_surface_is_not_positioned_after_a_cancellation() {
 #[test]
 fn the_limited_path_does_not_move_the_window_after_a_cancellation() {
     let mut fake = Fake::refusing();
-    // El cancelador pasa a true tras el primer read_until (después de mapear):
-    // en el camino limitado tampoco se piden tamaño ni posición.
+    // El cancelador pasa a true tras el primer read_until: en el camino
+    // limitado tampoco se piden tamaño ni posición.
     let mut checks = 0;
     let report = run_with(&mut fake, &placement(Anchor::Right), || {
         checks += 1;
-        checks > 3
+        checks > 2
     });
     assert_eq!(report.status, Status::Superseded);
     let after = fake
         .calls
         .iter()
-        .rposition(|c| c == "map")
-        .expect("la ventana se mapea");
+        .position(|c| c.starts_with("position"))
+        .expect("la ventana se mueve");
     let native_after: Vec<&String> = fake.calls[after + 1..]
         .iter()
         .filter(|c| c.starts_with("size") || c.starts_with("position"))
@@ -244,6 +435,80 @@ fn the_limited_path_does_not_move_the_window_after_a_cancellation() {
     assert!(
         native_after.is_empty(),
         "sin fases nativas tras cancelar: {native_after:?}"
+    );
+}
+
+#[test]
+fn a_cancelled_placement_leaves_no_resize_permission_open() {
+    let mut fake = Fake::granting();
+    let mut checks = 0;
+    let report = run_with(&mut fake, &placement(Anchor::Right), || {
+        checks += 1;
+        checks > 1
+    });
+    assert_eq!(report.status, Status::Superseded);
+    // Aunque la colocación se cancele, el permiso de resize no queda abierto:
+    // se abre y se retira dentro de la misma llamada.
+    assert!(!fake.resizable, "el permiso se retira");
+}
+
+#[test]
+fn a_failed_placement_leaves_the_window_in_its_real_size() {
+    // La llamada nativa no se pudo confirmar: la colocación termina, pero la
+    // ventana no puede quedar sujeta a un tamaño que ya no tiene: las pistas
+    // se dejan en el que tiene de verdad (no se sueltan: medido, soltar la
+    // petición de tamaño hace que la ventana vuelva a su tamaño por defecto).
+    let mut fake = Fake::granting();
+    // La llamada de posición no se puede confirmar (ni al reintento).
+    fake.fail_position_calls = 2;
+    let report = run(&mut fake, &placement(Anchor::Right), false);
+    assert_eq!(report.status, Status::Unverified);
+    assert_eq!(report.reason, Some(Reason::ReadFailed));
+    let constraints: Vec<&String> = fake
+        .calls
+        .iter()
+        .filter(|c| c.starts_with("constraints "))
+        .collect();
+    assert_eq!(
+        constraints,
+        vec!["constraints 320x260"],
+        "las pistas quedan en el tamaño real: {:?}",
+        fake.calls
+    );
+}
+
+#[test]
+fn a_superseded_placement_cannot_overwrite_the_successor_constraints() {
+    // La carrera real: la colocación sucesora fija sus pistas y cancela a
+    // esta. Al soltar el tamaño, la cancelada no puede pisarlas con una
+    // lectura vieja: dejarían la ventana sujeta a un tamaño que ya no tiene.
+    let mut fake = Fake::refusing();
+    // El compositor no concede el tamaño pedido: la ventana conserva el suyo.
+    // Las pistas de la sucesora son otras (otra medida de la tira).
+    fake.successor_constraints = Some((120, 181));
+    let first = next_generation();
+    let mut checks = 0;
+    let mut started = false;
+    let report = run_with(&mut fake, &placement(Anchor::Right), || {
+        checks += 1;
+        if checks > 2 && !started {
+            started = true;
+            next_generation(); // la sucesora empieza: cancela a esta
+        }
+        superseded(first)
+    });
+    assert_eq!(report.status, Status::Superseded);
+    // Las pistas son las de la sucesora: la cancelada no escribe ninguna.
+    let constraints: Vec<&String> = fake
+        .calls
+        .iter()
+        .filter(|c| c.starts_with("constraints "))
+        .collect();
+    assert_eq!(
+        constraints,
+        vec!["constraints 120x181"],
+        "una colocación caducada no pisa las pistas de la sucesora: {:?}",
+        fake.calls
     );
 }
 
@@ -278,16 +543,107 @@ fn the_anchored_edge_survives_a_different_granted_size() {
 }
 
 #[test]
-fn the_limited_path_restores_the_hints_to_the_real_size() {
+fn each_anchor_keeps_its_edge_with_the_effective_size() {
+    // El gestor concede un tamaño menor que el pedido: cada borde anclado se
+    // conserva con la geometría efectiva. `Top` y `Left` comparten fórmula
+    // (conservan el origen), así que se distinguen de `Bottom` y `Right`.
+    for (anchor, expected) in [
+        (Anchor::Top, "position 1859,899"),
+        (Anchor::Bottom, "position 1859,980"),
+        (Anchor::Left, "position 1859,899"),
+        (Anchor::Right, "position 1880,899"),
+    ] {
+        let mut fake = Fake::granting();
+        fake.granted = Geometry {
+            origin: (1859, 899),
+            size: (40, 100),
+        };
+        fake.pending = fake.granted;
+        fake.delay = 0;
+        let report = run(&mut fake, &placement(anchor), false);
+        assert_eq!(report.status, Status::Limited, "{anchor:?}");
+        let moves: Vec<&String> = fake
+            .calls
+            .iter()
+            .filter(|c| c.starts_with("position"))
+            .collect();
+        // El primer movimiento usa el tamaño pedido; el segundo, el efectivo.
+        assert_eq!(
+            moves.first().map(|m| m.as_str()),
+            Some("position 1859,899"),
+            "{anchor:?}"
+        );
+        assert_eq!(
+            moves.last().map(|m| m.as_str()),
+            Some(expected),
+            "el borde {anchor:?} se conserva: {moves:?}"
+        );
+    }
+}
+
+#[test]
+fn a_second_generation_cancels_the_first_placement() {
+    // Dos generaciones reales: la segunda (un arrastre o una colocación
+    // posterior) invalida la primera. La cancelación llega **después** de la
+    // lectura: el ciclo ya movió la ventana y se para antes de informarla.
+    let first = next_generation();
+    let second = next_generation();
+    let mut fake = Fake::granting();
+    let mut checks = 0;
+    let report = run_with(&mut fake, &placement(Anchor::Right), || {
+        checks += 1;
+        checks > 2
+    });
+    assert_eq!(report.status, Status::Superseded);
+    assert!(superseded(first), "la primera generación está caducada");
+    assert!(!superseded(second), "la segunda sigue vigente");
+}
+
+#[test]
+fn the_limited_path_keeps_the_requested_size_and_never_another_one() {
     let mut fake = Fake::refusing();
     let report = run(&mut fake, &placement(Anchor::Right), false);
     assert_eq!(report.status, Status::Limited);
-    // Las pistas vuelven al tamaño real: la ventana no puede saltar después.
-    assert!(
-        fake.calls.iter().any(|c| c == "size 320x260"),
-        "las pistas se restauran: {:?}",
-        fake.calls
-    );
+    // Las pistas y la petición de tamaño son siempre las **pedidas**: nunca
+    // se sustituyen por un tamaño que el usuario no pidió (dejarían la
+    // ventana sujeta a un tamaño viejo).
+    for call in fake.calls.iter().filter(|c| c.starts_with("size ")) {
+        assert_eq!(call, "size 61x181", "sólo el tamaño pedido: {call}");
+    }
+}
+
+#[test]
+fn a_non_positive_or_non_finite_scale_is_rejected_before_any_native_call() {
+    // El factor de escala convierte píxeles físicos y lógicos: con 0 (o con un
+    // valor no finito) la conversión no tiene sentido (a 0 el tamaño lógico
+    // sería infinito y su recorte, un tamaño de 2³¹ píxeles).
+    let mut p = placement(Anchor::Right);
+    for scale in [0.0, -1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        p.scale = scale;
+        let error = p
+            .validate("widget")
+            .expect_err("un factor no utilizable no puede colocarse");
+        assert!(error.contains("scale"), "el error dice qué falla: {error}");
+    }
+    // Un factor utilizable pasa: la colocación sigue su curso.
+    p.scale = 1.5;
+    assert!(p.validate("widget").is_ok());
+    // Y el rectángulo se sigue validando igual.
+    p.scale = 1.0;
+    p.bounds.w = 0;
+    assert!(p.validate("widget").is_err());
+    p.bounds.w = 61;
+    assert!(p.validate("detail").is_err(), "sólo la ventana del widget");
+}
+
+#[test]
+fn the_origin_comes_from_the_root_or_there_is_no_reading_at_all() {
+    // La llamada a la raíz respondió: su origen es el que se informa.
+    assert_eq!(rooted_origin(1859, 899, true), Some((1859, 899)));
+    // Si falla, la lectura no es utilizable: el único respaldo disponible
+    // (`gdk_window_get_geometry`) es relativo al padre y mezclaría dos
+    // espacios de coordenadas.
+    assert_eq!(rooted_origin(0, 0, false), None);
 }
 
 #[test]
@@ -418,12 +774,16 @@ fn the_report_travels_with_the_effective_geometry_and_its_reason_code() {
             h: 181,
         }),
         reason: None,
+        read_back: true,
     };
     let json = serde_json::to_value(applied).unwrap();
     assert_eq!(json["status"], "applied");
     assert_eq!(json["bounds"]["x"], 1859);
     assert_eq!(json["bounds"]["w"], 61);
     assert!(json.get("reason").is_none());
+    // La marca del read-back: el frontend sólo aplica la tolerancia del
+    // redondeo a la geometría que vino del compositor.
+    assert_eq!(json["read_back"], true);
 
     let limited = Report {
         status: Status::Limited,
@@ -434,6 +794,7 @@ fn the_report_travels_with_the_effective_geometry_and_its_reason_code() {
             h: 260,
         }),
         reason: Some(Reason::SizeRefused),
+        read_back: true,
     };
     let json = serde_json::to_value(limited).unwrap();
     assert_eq!(json["status"], "limited");
@@ -444,11 +805,13 @@ fn the_report_travels_with_the_effective_geometry_and_its_reason_code() {
         status: Status::Superseded,
         bounds: None,
         reason: Some(Reason::Superseded),
+        read_back: false,
     };
     let json = serde_json::to_value(superseded).unwrap();
     assert_eq!(json["status"], "superseded");
     assert_eq!(json["reason"], "superseded");
     assert!(json["bounds"].is_null());
+    assert_eq!(json["read_back"], false);
 }
 
 /// Prueba en vivo de la secuencia nativa con un webview real (#179). No es
@@ -456,7 +819,7 @@ fn the_report_travels_with_the_effective_geometry_and_its_reason_code() {
 #[cfg(target_os = "linux")]
 #[test]
 #[ignore = "needs an X11 session"]
-fn the_native_sequence_fixes_the_size_of_a_real_webview_window() {
+fn the_native_sequence_grants_the_size_and_leaves_no_resize_permission() {
     use gtk::prelude::*;
     use webkit2gtk::WebViewExt;
     gtk::init().expect("GTK must initialise");
@@ -485,42 +848,68 @@ fn the_native_sequence_fixes_the_size_of_a_real_webview_window() {
         "la ventana arranca con su tamaño por defecto"
     );
 
-    // La secuencia de producción: pistas iguales y resize programático.
-    crate::widget_placement::fix_size(&window, 61, 181);
-    // Antes de mapear, el tamaño pedido es el de GDK (nada de destello).
-    assert_eq!(
-        window.size(),
-        (61, 181),
-        "el tamaño se pide antes de mapear"
-    );
-    // El mapeo es condicional: si la ventana ya está visible, no se toca.
-    crate::widget_placement::map_if_needed(&window);
+    // La visibilidad es del frontend: la ventana se muestra antes de colocarla.
+    window.show_all();
     settle(700);
-    assert_eq!(
-        window.size(),
-        (61, 181),
-        "el tamaño pedido se aplica exacto"
-    );
+    assert!(window.is_mapped(), "la ventana está visible");
 
-    // El resize manual es imposible: las pistas fijas recortan cualquier
-    // reconfiguración, aunque el cliente la pida.
-    window.resize(200, 200);
-    settle(300);
-    assert_eq!(
-        window.size(),
-        (61, 181),
-        "la ventana no se puede redimensionar"
+    // La secuencia de producción: la pista fija el tamaño y el permiso de
+    // resize se abre **sólo** alrededor del resize programático (la misma
+    // llamada lo retira).
+    assert!(
+        crate::widget_placement::apply_size(&window, 61, 181),
+        "el permiso de resize queda cerrado"
     );
+    settle(600);
+    assert_eq!(window.size(), (61, 181), "el tamaño se concede exacto");
+    assert!(!window.is_resizable(), "el permiso está cerrado");
 
     // Y la posición se aplica con el tamaño fijo puesto: las pistas iguales no
     // bloquean el movimiento.
     window.move_(1859, 899);
-    settle(300);
+    settle(400);
+    assert_eq!(window.position(), (1859, 899), "la posición se aplica");
+
+    // El tamaño sigue en pie después de la retirada: es lo que la pide el
+    // widget y lo que el gestor respeta.
+    settle(700);
+    assert_eq!(
+        window.size(),
+        (61, 181),
+        "el tamaño sobrevive a la retirada del permiso"
+    );
     assert_eq!(
         window.position(),
         (1859, 899),
-        "la posición se aplica con el tamaño fijo"
+        "la posición sobrevive a la retirada del permiso"
     );
+
+    // El read-back de GDK coincide con el compositor (sonda X11 opcional).
+    let gdk_window = window.window().expect("the gdk window");
+    let (gx, gy, gw, gh) = gdk_window.geometry();
+    assert_eq!(
+        (gx, gy, gw, gh),
+        (1859, 899, 61, 181),
+        "el read-back de GDK"
+    );
+    assert!(gdk_window.is_viewable(), "la ventana es visible");
+    match std::env::var("QUORB_X11_GEOMETRY_PROBE") {
+        Ok(probe) => {
+            let output = std::process::Command::new(&probe)
+                .args(["61", "181"])
+                .output()
+                .expect("the X11 probe must run");
+            let tree = String::from_utf8_lossy(&output.stdout);
+            println!("X11 window tree (abs=posición de raíz, size=tamaño):\n{tree}");
+            assert!(
+                tree.contains("abs=1859,899 size=61x181"),
+                "el compositor sitúa la ventana donde se pidió:\n{tree}"
+            );
+        }
+        Err(_) => {
+            println!("sin QUORB_X11_GEOMETRY_PROBE: el contraste con el compositor no se ejecuta")
+        }
+    }
 }
 
 /// Deja que GTK procese los eventos (la respuesta del gestor) durante `ms`.

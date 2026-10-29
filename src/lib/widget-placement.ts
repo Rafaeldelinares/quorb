@@ -5,7 +5,7 @@
 // decide qué se cachea con esa respuesta, si hay que ofrecer el reintento y
 // qué motivo ve el usuario.
 
-import type { PhysicalBounds } from './detail-panel';
+import { samePhysical, type PhysicalBounds } from './detail-panel';
 import type { MessageKey } from '../i18n';
 
 /** Borde del área de trabajo al que la tira está anclada. */
@@ -49,6 +49,12 @@ export interface WidgetPlacementReport {
   bounds: PhysicalBounds | null;
   /** El código del motivo, si lo hay. */
   reason?: WidgetPlacementReason | null;
+  /**
+   * True si la geometría vino del read-back del compositor (X11). Sólo esa
+   * geometría admite la tolerancia del redondeo: la que se pidió (Windows,
+   * macOS, Wayland nativo) se compara exacta.
+   */
+  read_back?: boolean;
 }
 
 /**
@@ -86,6 +92,26 @@ export const samePhysicalWithin = (
   Math.abs(a.w - b.w) <= tolerance &&
   Math.abs(a.h - b.h) <= tolerance;
 
+/**
+ * Compara la geometría cacheada con la pedida.
+ *
+ * La tolerancia de ±1 px es del read-back de X11 (el gestor redondea el
+ * tamaño lógico a píxeles de dispositivo), así que **sólo** se aplica a la
+ * geometría que vino del compositor. En el resto de plataformas (y en
+ * cualquier ruta sin read-back) la comparación es exacta: un cambio de 1 px
+ * sí es un cambio y se aplica.
+ */
+export const samePlacement = (
+  cached: PhysicalBounds | null,
+  requested: PhysicalBounds,
+  readBack: boolean,
+): boolean =>
+  cached === null
+    ? false
+    : readBack
+      ? samePhysicalWithin(cached, requested)
+      : samePhysical(cached, requested);
+
 /** Sólo la geometría física: la petición también lleva el ancla y el factor. */
 const physicalOnly = (bounds: PhysicalBounds): PhysicalBounds => ({
   x: bounds.x,
@@ -102,6 +128,8 @@ export interface PlacementOutcome {
   failed: boolean;
   /** El código del motivo (machine-readable), no su texto: lo traduce el widget. */
   reason: WidgetPlacementReason | null;
+  /** True si la geometría cacheada vino del read-back del compositor. */
+  readBack: boolean;
 }
 
 /**
@@ -117,16 +145,17 @@ export const placementOutcome = (
   report: WidgetPlacementReport | null | undefined,
   requested: PhysicalBounds,
 ): PlacementOutcome => {
-  if (!report) return { bounds: physicalOnly(requested), failed: false, reason: null };
-  if (report.status === 'superseded') return { bounds: null, failed: false, reason: null };
+  if (!report) return { bounds: physicalOnly(requested), failed: false, reason: null, readBack: false };
+  if (report.status === 'superseded') return { bounds: null, failed: false, reason: null, readBack: false };
   const reason = report.reason ?? null;
   // Sin lectura fiable no hay geometría que cachear: ni la solicitud.
   if (report.reason === 'read_failed' || report.reason === 'not_viewable') {
-    return { bounds: null, failed: true, reason };
+    return { bounds: null, failed: true, reason, readBack: false };
   }
   return {
     bounds: report.bounds ?? physicalOnly(requested),
     failed: report.status === 'limited',
     reason,
+    readBack: report.read_back === true,
   };
 };

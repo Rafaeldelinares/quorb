@@ -10,6 +10,7 @@ import {
   placementOutcome,
   reasonKey,
   samePhysicalWithin,
+  samePlacement,
   type WidgetPlacementReason,
   type WidgetPlacementReport,
   type WidgetPlacementRequest,
@@ -89,7 +90,9 @@ describe('placementOutcome', () => {
     expect(reasonText(outcome.reason, 'en')).toBe('the native window is not visible yet');
   });
 
-  it('never caches the request as verified when the backend does not answer', () => {
+  it('caches the requested geometry when the backend does not answer', () => {
+    // Sin informe del backend no hay lectura: se conserva la geometría pedida
+    // (sin darla por verificada), que es lo que el widget puede arrastrar.
     const outcome = placementOutcome(undefined, requested);
     expect(outcome.bounds).toEqual(requested);
     expect(outcome.failed).toBe(false);
@@ -136,6 +139,43 @@ describe('the dedup tolerance', () => {
     expect(samePhysicalWithin({ x: 1859, y: 899, w: 63, h: 181 }, requested)).toBe(false);
     expect(samePhysicalWithin({ x: 1859, y: 901, w: 61, h: 181 }, requested)).toBe(false);
     expect(samePhysicalWithin({ x: 1859, y: 899, w: 61, h: 181 }, requested)).toBe(true);
+  });
+
+  it('applies the tolerance only to the geometry that came from the X11 read-back', () => {
+    // El read-back de X11: el gestor redondea el tamaño lógico a píxeles de
+    // dispositivo, así que 1 px de diferencia es el mismo tamaño.
+    expect(samePlacement({ x: 1859, y: 899, w: 62, h: 181 }, requested, true)).toBe(true);
+    expect(samePlacement({ x: 1859, y: 899, w: 63, h: 181 }, requested, true)).toBe(false);
+    // La posición también pasa por la conversión de escala (píxeles lógicos ⇄
+    // físicos): 1 px de diferencia es la misma posición.
+    expect(samePlacement({ x: 1860, y: 899, w: 61, h: 181 }, requested, true)).toBe(true);
+    expect(samePlacement({ x: 1861, y: 899, w: 61, h: 181 }, requested, true)).toBe(false);
+    // Sin read-back (Windows, macOS, Wayland nativo) un cambio de 1 px **sí**
+    // es un cambio: la comparación es exacta.
+    expect(samePlacement({ x: 1859, y: 899, w: 62, h: 181 }, requested, false)).toBe(false);
+    expect(samePlacement({ x: 1860, y: 899, w: 61, h: 181 }, requested, false)).toBe(false);
+    expect(samePlacement({ x: 1859, y: 899, w: 61, h: 181 }, requested, false)).toBe(true);
+    // Y sin caché no hay comparación.
+    expect(samePlacement(null, requested, true)).toBe(false);
+    expect(samePlacement(null, requested, false)).toBe(false);
+  });
+});
+
+describe('the read-back marker', () => {
+  it('carries the read-back flag so only that geometry uses the tolerance', () => {
+    const measured = placementOutcome(report({ read_back: true }), requested);
+    expect(measured.readBack).toBe(true);
+    expect(measured.bounds).toEqual(effective);
+    // La ruta que no lee nada (Windows, macOS, Wayland nativo): comparación exacta.
+    const plain = placementOutcome(report({ read_back: false }), requested);
+    expect(plain.readBack).toBe(false);
+    // Y un informe sin geometría no es un read-back.
+    const none = placementOutcome(
+      report({ status: 'unverified', bounds: null, reason: 'not_viewable' }),
+      requested,
+    );
+    expect(none.readBack).toBe(false);
+    expect(none.bounds).toBeNull();
   });
 });
 

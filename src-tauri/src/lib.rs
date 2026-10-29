@@ -908,6 +908,11 @@ fn toggle_widget(app: &AppHandle) {
             let _ = app.emit_to(WIDGET, "widget-hidden", ());
         } else {
             let _ = w.show();
+            // La ventana vuelve a ser visible: el widget reintenta la
+            // colocación (la anterior pudo quedarse sin leer mientras
+            // estaba oculta) (#179). Si la geometría cacheada ya coincide,
+            // su deduplicación no vuelve a pedirla.
+            let _ = app.emit_to(WIDGET, "widget-shown", ());
         }
     }
 }

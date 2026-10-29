@@ -111,6 +111,7 @@ const MONOGRAM: Record<string, { text: string; sub?: string }> = {
   openrouter: { text: 'OR' },
   minimax: { text: 'MM' },
   nine_router: { text: '9R' },
+  opencode_go: { text: 'OC' },
 };
 
 /** Las APIs de pago por uso llevan una etiqueta «API» para distinguirlas de la suscripción. */
