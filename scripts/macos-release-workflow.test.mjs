@@ -196,7 +196,20 @@ jobs:
           if (String(result.releaseId) !== process.env.RELEASE_ID) throw new Error('Release identity changed');
           NODE
           dmg="source/src-tauri/target/release/bundle/dmg/Quorb_\${RELEASE_VERSION}_aarch64.dmg"
-          gh release upload "v$RELEASE_VERSION" "$dmg" "$dmg.sha256" --repo egdev6/quorb
+          name="\${dmg##*/}"
+          dmg_id="$(gh api --method POST -H 'Content-Type: application/x-apple-diskimage' "https://uploads.github.com/repos/egdev6/quorb/releases/$RELEASE_ID/assets?name=$name" --input "$dmg" --jq .id)"
+          if ! [[ "$dmg_id" =~ ^[0-9]+$ ]]; then
+            echo "::error::DMG upload returned a non-numeric asset id; deleting nothing."
+            exit 1
+          fi
+          if ! gh api --method POST -H 'Content-Type: text/plain' "https://uploads.github.com/repos/egdev6/quorb/releases/$RELEASE_ID/assets?name=$name.sha256" --input "$dmg.sha256" --jq .id; then
+            echo "::error::SHA-256 upload failed; removing only the DMG this run uploaded."
+            if ! gh api --method DELETE "repos/egdev6/quorb/releases/assets/$dmg_id"; then
+              echo "::error::Rollback failed; manual cleanup needed for $name (asset id $dmg_id)."
+              exit 1
+            fi
+            exit 1
+          fi
 `.replaceAll('\\${', '${');
 
 function assertContract(draft, workflow, pkg) {
@@ -236,10 +249,16 @@ test('rejects mutations to every reviewed line, step order and byte materializat
     ['run: npm ci', 'if: always()\n        run: npm ci'],
     ['run: npm ci', 'run: echo ${{ inputs.version }}'],
     ['    env:\n', '    env:\n      APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}\n'],
-    ['--repo egdev6/quorb', '--clobber --repo egdev6/quorb'],
+    ['--input "$dmg"', '--clobber --input "$dmg"'],
     ['"$dmg.sha256"', '"$dmg.sha256" latest.json'], ['SRD8T33RU5', 'OTHERTEAM1'],
     ['--strict', '--verbose'], ['stapler\', \'validate', 'stapler\', \'staple'],
     ['--wait', '--no-wait'], ["flag: 'wx'", "flag: 'w'"],
+    ['gh api --method DELETE "repos/egdev6/quorb/releases/assets/$dmg_id"', 'gh release delete-asset "v$RELEASE_VERSION" "$name" --repo egdev6/quorb --yes'],
+    ['releases/assets/$dmg_id', 'releases/assets/$sha_id'],
+    ['releases/assets/$dmg_id', 'releases/assets/12345'],
+    ['[[ "$dmg_id" =~ ^[0-9]+$ ]]', 'true'],
+    ['releases/assets/$dmg_id"; then', 'releases/assets/$dmg_id" || true; then'],
+    ['manual cleanup needed for $name (asset id $dmg_id).', 'cleanup succeeded.'],
   ];
   for (const pin of expected.matchAll(/uses: (\S+)/g)) mutations.push([pin[1], pin[1].replace(/@.*/, '@main')]);
   for (const [before, after] of mutations) {
@@ -247,7 +266,28 @@ test('rejects mutations to every reviewed line, step order and byte materializat
     const changed = Buffer.from(expected.replace(before, after));
     assert.throws(() => assertContract(changed, changed, pkg()), undefined, before);
   }
+  const checksumUpload = 'gh api --method POST -H \'Content-Type: text/plain\' "https://uploads.github.com/repos/egdev6/quorb/releases/$RELEASE_ID/assets?name=$name.sha256" --input "$dmg.sha256" --jq .id';
+  const rollbackStart = expected.indexOf(`          if ! ${checksumUpload}; then\n`);
+  assert.ok(rollbackStart >= 0, 'Rollback removal mutation must apply');
+  const rollback = expected.slice(rollbackStart);
+  assert.ok(rollback.includes('gh api --method DELETE'), 'Rollback mutation must remove the DELETE');
+  const changedRollback = expected.replace(rollback, `          ${checksumUpload}\n`);
+  assert.notEqual(changedRollback, expected, 'Rollback removal mutation must change the workflow');
+  assert.throws(() => assertContract(Buffer.from(changedRollback), Buffer.from(changedRollback), pkg()), undefined, 'Removed rollback branch');
+  const revalidation = `          node --input-type=module <<'NODE'
+          import { preflightRelease } from './scripts/macos-release-preflight.mjs';
+          const result = await preflightRelease();
+          if (String(result.releaseId) !== process.env.RELEASE_ID) throw new Error('Release identity changed');
+          NODE
+`;
+  assert.ok(expected.includes(revalidation), 'Upload order mutation must apply');
+  const uploadBeforeRevalidation = expected.replace(revalidation, '') + revalidation;
+  assert.notEqual(uploadBeforeRevalidation, expected, 'Upload order mutation must change the workflow');
+  assert.throws(() => assertContract(Buffer.from(uploadBeforeRevalidation), Buffer.from(uploadBeforeRevalidation), pkg()), undefined, 'Upload order changed');
+  assert.ok(expected.includes('          npm run app:build:mac\n'), 'Build order mutation must remove the build');
+  assert.ok(expected.includes('          xcrun stapler staple "$dmg"'), 'Build order mutation must find stapling');
   const swapped = expected.replace('          npm run app:build:mac\n', '').replace('          xcrun stapler staple "$dmg"', '          xcrun stapler staple "$dmg"\n          npm run app:build:mac');
+  assert.notEqual(swapped, expected, 'Build order mutation must change the workflow');
   assert.throws(() => assertContract(Buffer.from(swapped), Buffer.from(swapped), pkg()));
   assert.throws(() => assertContract(bytes, Buffer.from(expected.replaceAll('\n', '\r\n')), pkg()));
   assert.throws(() => assertContract(bytes, Buffer.from(expected + '\n'), pkg()));
