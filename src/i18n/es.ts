@@ -180,7 +180,7 @@ export const es = {
     },
     // Página «Proveedores»: lista, panel lateral, comprobación y aviso del CLI.
     // Los nombres de proveedor son marcas y no se traducen (salvo el que lleva una
-    // conjunción española: `codexName`). Los paneles por proveedor van en PR-C.
+    // conjunción española: `codexName`). Los paneles por proveedor van en `panels`.
     providers: {
       refreshEvery: 'Consultar cada',
       refreshUnit: 'min',
@@ -312,6 +312,74 @@ export const es = {
         sessionDirEnd: 'dentro de ella.',
         remove: 'Eliminar esta cuenta',
         removeHint: 'Al guardar se borran también sus claves del almacén seguro del sistema.',
+      },
+      // Paneles por proveedor de suscripción (T2c slice 2 C1b, #66). Los títulos son
+      // marcas con su plan y no se traducen; tampoco `Subscription Key`, `API key PAYG`
+      // ni `Base URL` (rótulos de las consolas de terceros). Donde el texto es idéntico
+      // se reutilizan `accountEditor.*` (usuario, plan, token, «Créala en»).
+      panels: {
+        stepsAria: 'Cómo conectar la cuenta',
+        kickerOAuth: 'Suscripción · OAuth',
+        kickerOfficialApi: 'Suscripción · API oficial',
+        emptyEquals: 'Vacío =',
+        or: 'o',
+        credentialsFile: 'Fichero de credenciales',
+        authJsonFile: 'Fichero auth.json',
+        loginCommand: 'Comando de login',
+        advancedSessionLogin: 'Avanzado · fichero de sesión y comando de login',
+        claude: {
+          note: 'Límites de sesión (5 h), semanales y por modelo de tu plan. Quorb lee la sesión que guarda Claude Code: no ve tu contraseña ni toca los tokens.',
+          wsl: 'Para WSL:',
+          wslUser: 'TU_USUARIO',
+        },
+        codex: {
+          note: 'Límites de 5 h y semanales de tu plan de ChatGPT en Codex. Quorb lee la sesión que guarda el CLI de Codex.',
+        },
+        gemini: {
+          kicker: 'Suscripción · sesión de Gemini CLI',
+          noteBefore: 'Cuotas diarias por modelo. Quorb lee la sesión que guarda',
+          noteAfter: '. Endpoints no oficiales.',
+        },
+        grok: {
+          noteBefore: 'Uso semanal de créditos de tu suscripción en el CLI de Grok. Quorb lee la sesión que guarda',
+          noteAfter: '. Endpoint no oficial.',
+        },
+        cursor: {
+          kicker: 'Suscripción · sesión de la app',
+          note: 'Uso del plan en el ciclo actual (total, Auto y modelos API) y gasto on-demand. Endpoint no oficial.',
+          loginTitle: 'Inicia sesión en la app de Cursor',
+          loginBody: 'Quorb lee la sesión que guarda la app de Cursor en este equipo (solo lectura). Si no usas la app aquí, pega un token manual: tiene prioridad sobre la sesión de la app.',
+          tokenLabel: 'Token manual (opcional)',
+          advanced: 'Avanzado · base de datos de Cursor',
+          dbLabel: 'Base de datos de Cursor',
+        },
+        copilot: {
+          note: 'Peticiones premium del mes con la API de facturación de GitHub. Se reinician el día 1 (UTC).',
+          tokenLabel: 'Token de GitHub (fine-grained)',
+          tokenCreateIn: 'Créalo en',
+          tokenPermission: 'con el permiso de cuenta «Plan»: solo lectura.',
+        },
+        minimax: {
+          noteBefore: 'Cuota del plan y, si añades la segunda clave, tu saldo de pago por uso. Son',
+          noteBold: 'dos credenciales distintas',
+          noteAfter: 'en la consola: la primera da acceso al plan y la segunda al saldo.',
+          subscriptionTitle: 'Subscription Key del plan',
+          subscriptionHintBefore: 'Del panel M/Token en',
+          subscriptionHintChina: '. En la región de China, en',
+          subscriptionHintAfter: '(el host por región se cambia en Ajustes avanzados).',
+          paygTitle: 'API key de pago por uso (opcional)',
+          paygHint: 'Sin ella solo se muestra la cuota del plan; el saldo es opcional y su fallo no lo degrade.',
+          advanced: 'Avanzado · URL del API',
+          baseUrlHint: 'Las claves son por región: global en api.minimax.io, China en api.minimaxi.com. Si el anillo sale con error 1004 o 2049, prueba con la de tu región.',
+        },
+        zai: {
+          kicker: 'Suscripción · GLM Coding Plan',
+          note: 'Cuotas de coding de las últimas 5 h y de la semana, y cuota mensual de web tools del Coding Plan.',
+        },
+        opencodeGo: {
+          kicker: 'Suscripción · Go / Go Plus',
+          note: 'Cuota de las últimas 5 h, cuota semanal y cuota del ciclo de facturación de la suscripción Go / Go Plus.',
+        },
       },
     },
   },
