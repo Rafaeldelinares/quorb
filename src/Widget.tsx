@@ -569,11 +569,14 @@ export function Widget() {
       // `not_viewable` no es un fallo real: se reintenta en silencio en vez
       // de mostrarse como un fallo que no ha ocurrido.
       if (!same && reason === 'not_viewable' && !hiddenByUser.current) {
-        const report = await readPlacementWithRetries(async () => {
-          if (disposed || !current()) return null;
-          return api.setWidgetBounds(physical);
-        });
-        if (disposed || !current() || !report) return;
+        const report = await readPlacementWithRetries(
+          async () => {
+            if (disposed || !current() || hiddenByUser.current) return null;
+            return api.setWidgetBounds(physical);
+          },
+          { shouldAbort: () => disposed || !current() || hiddenByUser.current },
+        );
+        if (disposed || !current() || hiddenByUser.current || !report) return;
         apply(report);
       }
       if (phase === 'preparing' || phase === 'settling') await waitForViewport();

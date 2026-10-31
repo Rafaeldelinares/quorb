@@ -159,6 +159,54 @@ describe('readPlacementWithRetries', () => {
     expect(read).toHaveBeenCalledTimes(1);
     expect(result).toBeNull();
   });
+
+  it('aborts retries when shouldAbort triggers during the wait', async () => {
+    // Si el usuario oculta la tira durante la espera entre reintentos,
+    // se detiene inmediatamente sin realizar más lecturas nativas.
+    let hidden = false;
+    const sleep = vi.fn(async () => {
+      hidden = true; // el usuario ocultó la tira mientras esperaba
+    });
+    const read = sequence(notViewable(), report());
+    const result = await readPlacementWithRetries(read, {
+      attempts: 3,
+      sleep,
+      shouldAbort: () => hidden,
+    });
+    expect(read).toHaveBeenCalledTimes(1);
+    expect(sleep).toHaveBeenCalledTimes(1);
+    expect(result).toBeNull();
+  });
+
+  it('discards report if shouldAbort triggers while read was in flight', async () => {
+    // Si la lectura nativa estaba en vuelo cuando se ocultó la tira,
+    // el resultado se descarta y devuelve null para no aplicar nada.
+    let hidden = false;
+    let callCount = 0;
+    const read = vi.fn(async () => {
+      callCount++;
+      if (callCount === 2) {
+        hidden = true; // se ocultó durante la llamada
+      }
+      return notViewable();
+    });
+    const result = await readPlacementWithRetries(read, {
+      attempts: 3,
+      sleep: async () => {},
+      shouldAbort: () => hidden,
+    });
+    expect(read).toHaveBeenCalledTimes(2);
+    expect(result).toBeNull();
+  });
+
+  it('aborts immediately before the first read if shouldAbort is already true', async () => {
+    const read = vi.fn(async () => report());
+    const result = await readPlacementWithRetries(read, {
+      shouldAbort: () => true,
+    });
+    expect(read).not.toHaveBeenCalled();
+    expect(result).toBeNull();
+  });
 });
 
 describe('the reason codes', () => {

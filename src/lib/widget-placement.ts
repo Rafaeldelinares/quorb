@@ -193,17 +193,24 @@ export const readPlacementWithRetries = async (
     delayMs?: number;
     /** Espera inyectable (los tests no usan temporizadores reales). */
     sleep?: (ms: number) => Promise<void>;
+    /** Aborta antes o después de la espera si la condición se cumple (p. ej. tira ocultada). */
+    shouldAbort?: () => boolean;
   } = {},
 ): Promise<WidgetPlacementReport | null> => {
   const attempts = Math.max(1, opts.attempts ?? PLACEMENT_READ_ATTEMPTS);
   const delayMs = opts.delayMs ?? PLACEMENT_READ_DELAY_MS;
   const sleep =
     opts.sleep ?? ((ms: number) => new Promise<void>((resolve) => window.setTimeout(resolve, ms)));
+  const shouldAbort = opts.shouldAbort ?? (() => false);
+  if (shouldAbort()) return null;
   let report = await read();
+  if (shouldAbort()) return null;
   for (let attempt = 1; attempt < attempts; attempt++) {
     if (!report || report.reason !== 'not_viewable') break;
     await sleep(delayMs);
+    if (shouldAbort()) return null;
     report = await read();
+    if (shouldAbort()) return null;
   }
   return report;
 };
