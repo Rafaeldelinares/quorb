@@ -56,6 +56,22 @@ describe('the anchored panel state', () => {
     expect(panelHoldsOpen(clickPanel(NO_PANEL, 'openai'))).toBe(true);
     expect(panelHoldsOpen(hoverPanel(NO_PANEL, 'openai'))).toBe(false);
   });
+
+  it('unfocus callback only closes anchored panels and leaves transient unchanged', () => {
+    // Al perder el foco de ambas ventanas, el anclado se cierra inmediatamente.
+    // Pero si el panel era transitorio, no se toca el estado (su autocierre
+    // programado de 280 ms o los 8 s del atajo no se cancela).
+    const anchored = clickPanel(NO_PANEL, 'openai');
+    const transient = hoverPanel(NO_PANEL, 'openai');
+
+    const handleFocusLoss = (current: PanelState): PanelState => {
+      if (!panelHoldsOpen(current)) return current;
+      return closePanel();
+    };
+
+    expect(handleFocusLoss(anchored)).toEqual(NO_PANEL);
+    expect(handleFocusLoss(transient)).toEqual(transient);
+  });
 });
 
 describe('the reorder guard', () => {

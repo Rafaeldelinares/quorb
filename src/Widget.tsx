@@ -783,13 +783,21 @@ export function Widget() {
   // El foco de nuestras propias ventanas (#170): el anclaje se suelta cuando el
   // foco sale de las DOS (la tira y el detalle). El seam vive en
   // `src/lib/anchor-focus.ts`, con su ventana de asentamiento.
+  //
+  // Si el panel está anclado, se cierra inmediatamente y se limpian los
+  // temporizadores. Si el panel es transitorio (abierto por hover/atajo sin
+  // anclar), la pérdida de foco no cancela su temporizador de cierre: el
+  // autocierre programado (280 ms o los 8 s del atajo) sigue su curso.
   useEffect(() => {
     let disposed = false;
     const tracker = createFocusTracker(() => {
       if (disposed) return;
-      window.clearTimeout(closeTimer.current);
-      window.clearTimeout(openTimer.current);
-      setPanel((current) => (panelHoldsOpen(current) ? closePanel() : current));
+      setPanel((current) => {
+        if (!panelHoldsOpen(current)) return current;
+        window.clearTimeout(closeTimer.current);
+        window.clearTimeout(openTimer.current);
+        return closePanel();
+      });
     });
     let unlisten: (() => void) | null = null;
     listen<[OwnWindow, boolean]>(FOCUS_EVENT, ({ payload }) => {
