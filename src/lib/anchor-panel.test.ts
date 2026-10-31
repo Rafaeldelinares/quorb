@@ -2,8 +2,17 @@
 // y si está anclado. El componente usa estas funciones; aquí se fija el
 // contrato sin DOM ni servidor X.
 
-import { describe, expect, it } from 'vitest';
-import { clickPanel, closePanel, hoverPanel, isReorderGesture, NO_PANEL, panelHoldsOpen, REORDER_GUARD_MS } from './anchor-panel';
+import { describe, expect, it, vi } from 'vitest';
+import {
+  clickPanel,
+  closePanel,
+  createPanelCoordinator,
+  hoverPanel,
+  isReorderGesture,
+  NO_PANEL,
+  panelHoldsOpen,
+  REORDER_GUARD_MS,
+} from './anchor-panel';
 
 describe('the anchored panel state', () => {
   it('starts closed', () => {
@@ -63,5 +72,100 @@ describe('the reorder guard', () => {
 
   it('does not treat a click without a reorder as a reorder gesture', () => {
     expect(isReorderGesture(0, 1000)).toBe(false);
+  });
+});
+
+describe('the panel coordinator (delayed open and escape cancellation)', () => {
+  it('cancels pending open when Escape is pressed before the delay expires', () => {
+    let timerRun: (() => void) | null = null;
+    const schedule = vi.fn((run: () => void) => {
+      timerRun = run;
+      return () => {
+        timerRun = null;
+      };
+    });
+
+    const onStateChange = vi.fn();
+    const coordinator = createPanelCoordinator(onStateChange, { schedule });
+
+    // 1. Foco o hover en un orbe programa la apertura con retardo
+    coordinator.requestOpen('openai', 150);
+    expect(schedule).toHaveBeenCalledTimes(1);
+    expect(coordinator.getState()).toEqual(NO_PANEL);
+
+    // 2. Escape se pulsa antes de que venza el retardo
+    coordinator.escape();
+    expect(coordinator.getState()).toEqual(NO_PANEL);
+    expect(timerRun).toBeNull();
+
+    // 3. El avance del temporizador no reabre el panel
+    if (timerRun) (timerRun as () => void)();
+    expect(coordinator.getState()).toEqual(NO_PANEL);
+    expect(onStateChange).toHaveBeenLastCalledWith(NO_PANEL);
+  });
+
+  it('opens transiently if Escape is not pressed and the timer runs', () => {
+    let timerRun: (() => void) | null = null;
+    const schedule = vi.fn((run: () => void) => {
+      timerRun = run;
+      return () => {
+        timerRun = null;
+      };
+    });
+
+    const coordinator = createPanelCoordinator(() => {}, { schedule });
+    coordinator.requestOpen('openai', 150);
+    expect(coordinator.getState()).toEqual(NO_PANEL);
+
+    // Vence el temporizador sin Escape
+    if (timerRun) (timerRun as () => void)();
+    expect(coordinator.getState()).toEqual({ providerId: 'openai', anchored: false });
+  });
+
+  it('cancels pending open when detail window emits escape', () => {
+    let timerRun: (() => void) | null = null;
+    const schedule = vi.fn((run: () => void) => {
+      timerRun = run;
+      return () => {
+        timerRun = null;
+      };
+    });
+
+    const coordinator = createPanelCoordinator(() => {}, { schedule });
+    coordinator.requestOpen('openai', 150);
+
+    // Cierre recibido por escape
+    coordinator.escape();
+    expect(timerRun).toBeNull();
+    expect(coordinator.getState()).toEqual(NO_PANEL);
+  });
+
+  it('cancels pending open when a click anchors the panel', () => {
+    let timerRun: (() => void) | null = null;
+    const schedule = vi.fn((run: () => void) => {
+      timerRun = run;
+      return () => {
+        timerRun = null;
+      };
+    });
+
+    const coordinator = createPanelCoordinator(() => {}, { schedule });
+    coordinator.requestOpen('openai', 150);
+    coordinator.click('openai');
+
+    expect(timerRun).toBeNull();
+    expect(coordinator.getState()).toEqual({ providerId: 'openai', anchored: true });
+  });
+
+  it('ignores hover when panel is already anchored', () => {
+    const schedule = vi.fn();
+    const coordinator = createPanelCoordinator(() => {}, {
+      initialState: { providerId: 'openai', anchored: true },
+      schedule,
+    });
+
+    coordinator.requestOpen('cursor', 150);
+    expect(schedule).not.toHaveBeenCalled();
+    expect(coordinator.getState()).toEqual({ providerId: 'openai', anchored: true });
   });
 });

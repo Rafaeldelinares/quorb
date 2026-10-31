@@ -47,6 +47,81 @@ export const closePanel = (): PanelState => NO_PANEL;
 export const panelHoldsOpen = (state: PanelState): boolean => state.anchored;
 
 /**
+ * Coordinador de apertura retardada y cierre por Escape (#170).
+ *
+ * Desacopla la lógica de temporizadores y cierre del DOM para que el cableado
+ * pueda probarse de forma determinista sin servidor X ni GUI:
+ * - Si se programa una apertura y se pulsa `Escape` antes del retardo, la
+ *   apertura pendiente se cancela y el panel permanece cerrado.
+ * - Lo mismo aplica al recibir el evento `Escape` desde la ventana de detalle.
+ */
+export interface PanelCoordinator {
+  /** El estado actual del panel. */
+  getState(): PanelState;
+  /** Solicita abrir el panel (hover o foco de teclado). */
+  requestOpen(providerId: string, delayMs?: number): void;
+  /** Clic en un orbe (ancla o desancla). */
+  click(providerId: string): void;
+  /** Escape (desde la tira o desde el panel de detalle): cancela aperturas y cierra. */
+  escape(): void;
+  /** Cancela cualquier temporizador pendiente. */
+  cancelTimers(): void;
+}
+
+export const createPanelCoordinator = (
+  onStateChange: (state: PanelState) => void,
+  opts: {
+    initialState?: PanelState;
+    schedule?: (run: () => void, ms: number) => () => void;
+  } = {},
+): PanelCoordinator => {
+  let state = opts.initialState ?? NO_PANEL;
+  let cancelOpen: (() => void) | null = null;
+  const schedule =
+    opts.schedule ??
+    ((run: () => void, ms: number) => {
+      const id = setTimeout(run, ms);
+      return () => clearTimeout(id);
+    });
+
+  const update = (next: PanelState) => {
+    state = next;
+    onStateChange(next);
+  };
+
+  const cancelTimers = () => {
+    cancelOpen?.();
+    cancelOpen = null;
+  };
+
+  return {
+    getState: () => state,
+    requestOpen(providerId: string, delayMs = 0) {
+      if (state.anchored) return;
+      cancelTimers();
+      const apply = () => {
+        cancelOpen = null;
+        update(hoverPanel(state, providerId));
+      };
+      if (state.providerId || delayMs <= 0) {
+        apply();
+      } else {
+        cancelOpen = schedule(apply, delayMs);
+      }
+    },
+    click(providerId: string) {
+      cancelTimers();
+      update(clickPanel(state, providerId));
+    },
+    escape() {
+      cancelTimers();
+      update(closePanel());
+    },
+    cancelTimers,
+  };
+};
+
+/**
  * La guarda tras reordenar, en milisegundos.
  *
  * El clic llega **después** de `pointerup`, donde el gesto ya se consumió, así

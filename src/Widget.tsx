@@ -704,6 +704,12 @@ export function Widget() {
     if (detailReadyRef.current) emitTo(DETAIL_WINDOW, DETAIL_EVENTS.state, state).catch(console.warn);
   }, [active, geo, stripSize, edge, offset, vertical, anchorRel, dragging, collapsed, phase, panelWidth, orbSize, config?.opacity, config?.refreshMinutes, config?.nineRouter.baseUrl, ring1, ring2, ring3, updatedAt, error]);
 
+  // ───── panel al pasar el ratón ─────
+  const cancelTimers = () => {
+    window.clearTimeout(closeTimer.current);
+    window.clearTimeout(openTimer.current);
+  };
+
   useEffect(() => {
     let disposed = false;
     const unlisteners: (() => void)[] = [];
@@ -747,9 +753,11 @@ export function Widget() {
         setPanel(closePanel());
       }));
       // `Escape` desde el panel (#170): con el foco dentro del detalle, la
-      // tecla la atiende esa ventana, no la tira.
+      // tecla la atiende esa ventana, no la tira. Cancela aperturas pendientes
+      // para que no vuelva a abrirse de forma espuria al vencer el temporizador.
       await add(listen(DETAIL_EVENTS.escape, () => {
         if (disposed) return;
+        cancelTimers();
         setPanel(closePanel());
       }));
       if (!disposed) await emitTo(DETAIL_WINDOW, DETAIL_EVENTS.requestReady);
@@ -770,6 +778,8 @@ export function Widget() {
     let disposed = false;
     const tracker = createFocusTracker(() => {
       if (disposed) return;
+      window.clearTimeout(closeTimer.current);
+      window.clearTimeout(openTimer.current);
       setPanel((current) => (panelHoldsOpen(current) ? closePanel() : current));
     });
     let unlisten: (() => void) | null = null;
@@ -790,21 +800,17 @@ export function Widget() {
   }, []);
 
   // `Escape` cierra el panel (#170): lo atiende la tira, que tiene el foco
-  // desde el clic que ancló.
+  // desde el clic que ancló. Cancela también cualquier apertura pendiente.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return;
+      window.clearTimeout(closeTimer.current);
+      window.clearTimeout(openTimer.current);
       setPanel(closePanel());
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, []);
-
-  // ───── panel al pasar el ratón ─────
-  const cancelTimers = () => {
-    window.clearTimeout(closeTimer.current);
-    window.clearTimeout(openTimer.current);
-  };
 
   /** La posición del panel respecto de la tira, según el orbe. */
   const relOf = (el: HTMLElement): number => {
