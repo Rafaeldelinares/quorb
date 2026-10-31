@@ -11,6 +11,7 @@ import {
   isReorderGesture,
   NO_PANEL,
   panelHoldsOpen,
+  type PanelState,
   REORDER_GUARD_MS,
 } from './anchor-panel';
 
