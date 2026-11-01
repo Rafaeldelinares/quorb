@@ -27,6 +27,8 @@ import { accountTags } from './lib/accounts';
 import { clipSurfaceSafely, measureSurfaceClip } from './lib/surface-clip';
 import { peekRect, usesPeekWindow, waitForViewport, watchPreparation } from './lib/auto-hide';
 import { useDockReveal } from './lib/useDockReveal';
+import { useTextScale } from './lib/useTextScale';
+import { toCss, toMonitor } from './lib/text-scale';
 import { currentDragMode, dragMode, fallbackDragMode, resetDragMode, setDragMode } from './lib/drag-session';
 import { detectWindowManager } from './lib/wm-detect';
 import { t } from './i18n';
@@ -145,6 +147,15 @@ interface Size {
 
 const sameSize = (a: Size | null, b: Size) => !!a && a.w === b.w && a.h === b.h;
 
+/**
+ * CSS px to physical px of this WebView where it is now, which during a drag may
+ * already be another monitor (#228); `fallback` when the ratio is unreadable.
+ */
+const liveRatio = (fallback: number) => {
+  const ratio = globalThis.devicePixelRatio;
+  return Number.isFinite(ratio) && ratio > 0 ? ratio : fallback;
+};
+
 export function Widget() {
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [reports, setReports] = useState<UsageReport[]>([]);
@@ -180,6 +191,8 @@ export function Widget() {
   const [reorder, setReorder] = useState<{ id: string; order: string[] } | null>(null);
   const [update, setUpdate] = useState<UpdatePhase>({ phase: 'idle' });
   const updaterMode = useUpdaterMode();
+  /** Windows text scale (#228): the strip is laid out in CSS px and placed in monitor units. */
+  const textScale = useTextScale();
 
   const stripRef = useRef<HTMLDivElement>(null);
   const peekRef = useRef<HTMLButtonElement>(null);
@@ -222,7 +235,7 @@ export function Widget() {
   const shown = useRef(false);
   /** El usuario ocultó la tira desde la bandeja: la visibilidad es suya (#179). */
   const hiddenByUser = useRef(false);
-  const drag = useRef<{ sx: number; sy: number; start: PhysicalPosition | null; sf: number; raf: number; pointerId: number; ending: boolean } | null>(null);
+  const drag = useRef<{ sx: number; sy: number; start: PhysicalPosition | null; scale: number; raf: number; pointerId: number; ending: boolean } | null>(null);
   const orbDrag = useRef<{ id: string; x: number; y: number; moved: boolean } | null>(null);
   const lastReorderAt = useRef(0);
   const openPeakRef = useRef<() => void>(() => {});
@@ -516,13 +529,14 @@ export function Widget() {
     }
     if (!geo || !stripSize) return;
     let disposed = false;
-    const s = stripRect(geo.area, edge, offset, stripSize.w, stripSize.h);
-    const win = usesPeekWindow(phase) ? peekRect(s, edge) : s;
+    const s = stripRect(geo.area, edge, offset, toMonitor(stripSize.w, textScale), toMonitor(stripSize.h, textScale));
+    const win = usesPeekWindow(phase) ? peekRect(s, edge, textScale) : s;
     // La petición lleva el borde anclado y el factor con el que se calculó el
     // rectángulo: con otro tamaño efectivo, el borde se conserva y la
     // conversión no depende del factor de la ventana (DPI mixto) (#179).
     const physical = { ...physicalPanelBounds(win, geo.sf), anchor: edge, scale: geo.sf };
-    setPos({ strip: { x: s.x - win.x, y: s.y - win.y } });
+    // The strip offset inside the window is a CSS position (#228).
+    setPos({ strip: { x: toCss(s.x - win.x, textScale), y: toCss(s.y - win.y, textScale) } });
     placementInFlight.current = true;
     widgetQueue(async (current) => {
       if (disposed || !current()) return;
@@ -554,7 +568,9 @@ export function Widget() {
       }
       const surface = usesPeekWindow(phase) ? peekRef.current : stripRef.current;
       if (!surface) throw new Error('Widget surface is not mounted');
-      const clip = measureSurfaceClip(surface, physical, geo.sf);
+      // CSS radii to physical px through the target monitor, not the live ratio: the
+      // window may still be on another monitor (#228).
+      const clip = measureSurfaceClip(surface, physical, textScale * geo.sf);
       // Auto-hide uses CSS blur throughout, so its moving shape has no static native
       // blur rectangle and no blur-radius change at the start/end of the animation.
       await clipSurfaceSafely(clip, (c) => api.setSurfaceClip(c, !autoHide && phase === 'open'), console.warn, surface);
@@ -596,7 +612,7 @@ export function Widget() {
       console.warn(error);
     }).finally(() => { if (!disposed) placementInFlight.current = false; });
     return () => { disposed = true; };
-  }, [geo, stripSize, edge, offset, dragging, phase, autoHide, placementRetry, widgetQueue, markPrepared]);
+  }, [geo, stripSize, edge, offset, dragging, phase, autoHide, placementRetry, widgetQueue, markPrepared, textScale]);
 
   // Windows can displace or resize a normal window without changing the
   // monitor geometry or our cached target. Audit reality without moving healthy
@@ -659,12 +675,12 @@ export function Widget() {
       const size = await getCurrentWindow().innerSize();
       if (disposed || !current() || !stripRef.current) return;
       await clipSurfaceSafely(
-        measureSurfaceClip(stripRef.current, { w: size.width, h: size.height }, geo.sf),
+        measureSurfaceClip(stripRef.current, { w: size.width, h: size.height }, liveRatio(geo.sf * textScale)),
         (clip) => api.setSurfaceClip(clip, !autoHide), console.warn, stripRef.current,
       );
     }).catch(console.warn);
     return () => { disposed = true; };
-  }, [dragging, geo, autoHide, widgetQueue]);
+  }, [dragging, geo, autoHide, widgetQueue, textScale]);
 
   // Safety net for the compositor drag (issue #180, maintainer review point
   // 3): under the compositor's move grab the client may never receive the
@@ -684,7 +700,9 @@ export function Widget() {
 
   // The detail window owns its dimensions; hovering never mutates widget geometry.
   useEffect(() => {
-    const strip = geo && stripSize ? stripRect(geo.area, edge, offset, stripSize.w, stripSize.h) : null;
+    const strip = geo && stripSize
+      ? stripRect(geo.area, edge, offset, toMonitor(stripSize.w, textScale), toMonitor(stripSize.h, textScale))
+      : null;
     const state: DetailState | null = active && geo && strip && !dragging && !collapsed && phase === 'open' ? {
       // Keep the interaction session valid during background usage/config updates.
       revision: detailStateRef.current?.report.id === active.id
@@ -694,7 +712,7 @@ export function Widget() {
       area: geo.area,
       strip,
       edge,
-      anchor: (vertical ? strip.y : strip.x) + anchorRel,
+      anchor: (vertical ? strip.y : strip.x) + toMonitor(anchorRel, textScale),
       width: panelWidth,
       maxHeight: panelHeightLimit(geo.area, edge, strip),
       scaleFactor: geo.sf,
@@ -711,7 +729,7 @@ export function Widget() {
     detailStateRef.current = state;
     if (!state) detailInsideRef.current = false;
     if (detailReadyRef.current) emitTo(DETAIL_WINDOW, DETAIL_EVENTS.state, state).catch(console.warn);
-  }, [active, geo, stripSize, edge, offset, vertical, anchorRel, dragging, collapsed, phase, panelWidth, orbSize, config?.opacity, config?.refreshMinutes, config?.nineRouter.baseUrl, ring1, ring2, ring3, updatedAt, error]);
+  }, [active, geo, stripSize, textScale, edge, offset, vertical, anchorRel, dragging, collapsed, phase, panelWidth, orbSize, config?.opacity, config?.refreshMinutes, config?.nineRouter.baseUrl, ring1, ring2, ring3, updatedAt, error]);
 
   // ───── panel al pasar el ratón ─────
   const cancelTimers = () => {
@@ -1035,7 +1053,9 @@ export function Widget() {
     const initialStart = widgetBounds.current
       ? new PhysicalPosition(widgetBounds.current.x, widgetBounds.current.y)
       : null;
-    const d = { sx: e.screenX, sy: e.screenY, start: initialStart, sf: geo.sf, raf: 0, pointerId: e.pointerId, ending: false };
+    // `screenX`/`screenY` are CSS px of the docked window (#228): its monitor scale
+    // times the text scale turns their delta into physical px.
+    const d = { sx: e.screenX, sy: e.screenY, start: initialStart, scale: geo.sf * textScale, raf: 0, pointerId: e.pointerId, ending: false };
     drag.current = d;
     const current = () => dragMounted.current && drag.current === d;
     enqueueDrag(async () => {
@@ -1062,8 +1082,8 @@ export function Widget() {
     const d = drag.current;
     if (!d?.start || d.ending || e.pointerId !== d.pointerId) return;
     const current = () => dragMounted.current && drag.current === d;
-    const x = Math.round(d.start.x + (e.screenX - d.sx) * d.sf);
-    const y = Math.round(d.start.y + (e.screenY - d.sy) * d.sf);
+    const x = Math.round(d.start.x + (e.screenX - d.sx) * d.scale);
+    const y = Math.round(d.start.y + (e.screenY - d.sy) * d.scale);
     cancelAnimationFrame(d.raf);
     d.raf = requestAnimationFrame(() => {
       enqueueDrag(async () => {
@@ -1111,12 +1131,14 @@ export function Widget() {
         // reporta el orbe imantado en esa esquina, revisar primero el redondeo.
         const posX = (wpos.x !== 0 || wpos.y !== 0)
           ? wpos.x
-          : (d.start?.x ?? 0) + (e.screenX - d.sx) * d.sf;
+          : (d.start?.x ?? 0) + (e.screenX - d.sx) * d.scale;
         const posY = (wpos.x !== 0 || wpos.y !== 0)
           ? wpos.y
-          : (d.start?.y ?? 0) + (e.screenY - d.sy) * d.sf;
-        const cx = posX + (grip ? grip.left + grip.width / 2 : 0) * d.sf;
-        const cy = posY + (grip ? grip.top + grip.height / 2 : 0) * d.sf;
+          : (d.start?.y ?? 0) + (e.screenY - d.sy) * d.scale;
+        // The grip offset is CSS px of the window where it was dropped (#228).
+        const ratio = liveRatio(d.scale);
+        const cx = posX + (grip ? grip.left + grip.width / 2 : 0) * ratio;
+        const cy = posY + (grip ? grip.top + grip.height / 2 : 0) * ratio;
         const mon =
           mons.find((m) => contains({ x: m.position.x, y: m.position.y, w: m.size.width, h: m.size.height }, cx, cy)) ??
           (await currentMonitor());
