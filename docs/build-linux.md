@@ -238,11 +238,19 @@ NVIDIA RTX 3060 Mobile + AMD Renoir, WebKitGTK 2.52.6, eDP-1 1920×1080.
 
 **Lo que la medición sostiene y lo que no.** La A/B respalda la mitigación en
 esa máquina: con la variable seteada el rectángulo no aparece. No demuestra la
-hipótesis de memoria sin inicializar como mecanismo, y el artefacto **no
-reproduce** cuando la tira no cambia de tamaño (por ejemplo, sin proveedores
-configurados): hace falta el redimensionado de una superficie visible. La
-re-medición con el binario integrado sigue pendiente, igual que la evidencia en
-GNOME (#107).
+hipótesis de memoria sin inicializar como mecanismo.
+
+**El artefacto no reproduce hoy** (medido el 2026-11-05, misma máquina): ni
+dejando la tira quieta, ni forzando un redimensionado con la tira visible
+(cambio de escala del display, que el frontend recoge en su sondeo de
+monitor). La observación del 2026-10-23 se produjo con el ciclo de
+recuperación de 5 s de #148, que redimensionaba la tira visible de forma
+periódica; ese ciclo ya está acotado por #169. **Hipótesis, no hecho**: si
+fuera así, la mitigación queda como preventiva para el caso residual —un
+redimensionado legítimo de la tira visible (aparece un proveedor, se muestran
+los resets, cambia `orbSize` o el DPI)— y no como el cierre de un artefacto
+reproducible. La re-medición con el binario integrado y la evidencia en GNOME
+siguen pendientes (GNOME: #107, y aquí no hay sesión).
 
 ## 7. Riesgos priorizados (L0a→L0d)
 
