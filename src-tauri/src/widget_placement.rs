@@ -789,16 +789,25 @@ impl Surface for UiSurface {
 /// **sólo en el hilo de UI** — GDK no se puede tocar desde otro hilo.
 /// `transport()` (colocación) y `wm_compat::get_wm_info` (Ajustes/arrastre)
 /// derivan de esta misma caché para no poder discrepar.
+///
+/// `Unknown` **no** se cachea: si se consultara antes de que exista el display
+/// GDK, la caché quedaría fijada en `Unknown` para siempre. Se reintenta en la
+/// siguiente consulta, cuando el display ya está (issue #168).
 #[cfg(target_os = "linux")]
-fn display_kind() -> DisplayKind {
+pub(crate) fn display_kind() -> DisplayKind {
     static DISPLAY_KIND: std::sync::OnceLock<DisplayKind> = std::sync::OnceLock::new();
-    *DISPLAY_KIND.get_or_init(|| {
-        use gtk::prelude::*;
-        match gtk::gdk::Display::default() {
-            Some(display) => kind_from_type_name(display.type_().name()),
-            None => DisplayKind::Unknown,
-        }
-    })
+    if let Some(kind) = DISPLAY_KIND.get() {
+        return *kind;
+    }
+    use gtk::prelude::*;
+    let kind = match gtk::gdk::Display::default() {
+        Some(display) => kind_from_type_name(display.type_().name()),
+        None => DisplayKind::Unknown,
+    };
+    if kind != DisplayKind::Unknown {
+        let _ = DISPLAY_KIND.set(kind);
+    }
+    kind
 }
 
 /// El transporte de la superficie nativa, derivado del display real (caché

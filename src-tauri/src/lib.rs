@@ -4,6 +4,9 @@ mod codex_setup;
 mod config;
 mod config_transaction;
 mod detail_geometry;
+mod dmabuf_guard;
+#[cfg(test)]
+mod dmabuf_guard_test;
 mod history;
 mod i18n;
 mod login;
@@ -980,6 +983,12 @@ pub fn run() {
     if let Some(code) = uninstall::dispatch(&std::env::args().skip(1).collect::<Vec<_>>()) {
         std::process::exit(code);
     }
+    // WebKitGTK lee `WEBKIT_DISABLE_DMABUF_RENDERER` al inicializar el toolkit,
+    // así que la variable tiene que estar seteada antes de que exista la
+    // primera webview. Tauri crea la webview del widget declarada en
+    // `tauri.conf.json` dentro de `build()`, antes del hook `setup()`: por eso
+    // la mitigación va aquí y no en `setup()` (issue #168).
+    dmabuf_guard::apply_before_first_webview();
     let builder = tauri::Builder::default()
         // Debe ir el primero: si ya está abierta, muestra el widget existente.
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {

@@ -210,6 +210,40 @@ Celdas: `medido` (con evidencia de esta sesión/CI), `pendiente contribuidor`
   (por ejemplo `GDK_BACKEND=x11 &` en su propia línea) aplica la variable solo
   a la subshell y la app no la hereda.
 
+### 6.2 Transparencia en Wayland nativo: mitigación DMABUF (#168)
+
+Sobre Wayland, WebKitGTK compone el buffer del widget con DMABUF. Cuando una
+superficie WebKitGTK transparente **ya visible** cambia de tamaño, el
+compositor puede componer memoria sin inicializar y pintar un rectángulo negro
+opaco sobre el escritorio. La app desactiva esa ruta de forma automática: si el
+backend efectivo del display GDK es Wayland, fija
+`WEBKIT_DISABLE_DMABUF_RENDERER=1` (WebKitGTK usa SHM en su lugar) antes de que
+exista la primera webview. Bajo X11/XWayland no se toca nada: allí la ruta
+DMABUF no es el problema.
+
+**Medición (A/B, 2026-10-23)** — el disparador es el **redimensionado** de una
+superficie visible (aparece un proveedor, se muestran los resets, cambia
+`orbSize` o el DPI). Sin ese disparador el rectángulo no aparece.
+
+| Build | Backend | Variables | Rectángulo negro | Arrastre |
+|---|---|---|---|---|
+| 0.7.0 | Wayland | — | sí (~1:40) | no |
+| 0.7.0 | Wayland | `WEBKIT_DISABLE_DMABUF_RENDERER=1` | no (15 min) | no |
+| 0.7.0 + #169 (`2610926`) | Wayland | — | sí (~2 min) | no |
+| 0.7.0 + #169 | X11 (`GDK_BACKEND=x11`) | — | no (10 min) | sí |
+
+Entorno de esa medición: CachyOS, kernel 7.2.4-3-cachyos, KDE Plasma 6.7.5
+(KWin 6.7.5, compositing OpenGL), sesión Wayland nativa (`wayland-0`),
+NVIDIA RTX 3060 Mobile + AMD Renoir, WebKitGTK 2.52.6, eDP-1 1920×1080.
+
+**Lo que la medición sostiene y lo que no.** La A/B respalda la mitigación en
+esa máquina: con la variable seteada el rectángulo no aparece. No demuestra la
+hipótesis de memoria sin inicializar como mecanismo, y el artefacto **no
+reproduce** cuando la tira no cambia de tamaño (por ejemplo, sin proveedores
+configurados): hace falta el redimensionado de una superficie visible. La
+re-medición con el binario integrado sigue pendiente, igual que la evidencia en
+GNOME (#107).
+
 ## 7. Riesgos priorizados (L0a→L0d)
 
 | Riesgo | Prob. | Impacto | Mitigación | Evidencia / entrada de código |
